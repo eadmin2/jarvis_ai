@@ -22,6 +22,7 @@ and approval events. Falls back to direct Anthropic ("basic mode") if unreachabl
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 import json
 import os
 import re
@@ -41,13 +42,24 @@ from fastapi.responses import JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from RealtimeSTT import AudioToTextRecorder
 
+from brain import GbrainAdapter, HermesAdapter
+from voice import (
+    CancellationToken,
+    PronunciationDictionary,
+    TTSMetrics,
+    TTSProvider,
+    create_tts_provider,
+)
+
 try:
     import psutil
 except ImportError:  # machines panel degrades gracefully
     psutil = None
 
 ROOT = Path(__file__).resolve().parent
-CONFIG_PATH = ROOT / "config" / "server.yaml"
+CONFIG_PATH = Path(
+    os.environ.get("JARVIS_CONFIG_PATH", ROOT / "config" / "server.yaml")
+).expanduser()
 LOG_PATH = ROOT / "logs" / "latency.jsonl"
 STATE_PATH = ROOT / "logs" / "hermes_sessions.json"
 USAGE_PATH = ROOT / "logs" / "usage_stats.json"
@@ -85,8 +97,25 @@ def read_usage() -> dict:
         except Exception:
             data = {"total": {}, "days": {}}
     return {"total": data.get("total", {}), "today": data.get("days", {}).get(_today(), {})}
-ENV_PATHS = [Path.home() / ".hermes" / ".env", ROOT / ".env"]
+
+
+def record_brain_usage(payload: dict) -> None:
+    usage = payload.get("usage") or {}
+    if not isinstance(usage, dict) or not usage:
+        return
+    record_usage(
+        llm_in=int(usage.get("input_tokens") or 0),
+        llm_out=int(usage.get("output_tokens") or 0),
+        turns=1,
+    )
+_ENV_OVERRIDE = os.environ.get("JARVIS_ENV_PATH")
+ENV_PATHS = (
+    [Path(_ENV_OVERRIDE).expanduser()]
+    if _ENV_OVERRIDE
+    else [Path.home() / ".hermes" / ".env", ROOT / ".env"]
+)
 SENTENCE_RE = re.compile(r"(.+?[.!?])(?=\s|$)", re.DOTALL)
+CLAUSE_RE = re.compile(r"(.{45,}?[,;:])(?=\s|$)", re.DOTALL)
 THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 CODEBLOCK_RE = re.compile(r"```.*?```", re.DOTALL)
 # Secret-shaped strings are never sent to cloud TTS (privacy filter):
@@ -133,7 +162,12 @@ class TurnTiming:
     llm_provider: str = ""
     llm_model: str = ""
     tts_model: str = ""
+    tts_provider: str = ""
     voice_id: str = ""
+    stt_language: str = ""
+    stt_confidence: float | None = None
+    tts_attempted_providers: list[str] = field(default_factory=list)
+    tts_fallback_active: bool = False
     run_id: str = ""
     interrupted: bool = False
     tools_used: list[str] = field(default_factory=list)
@@ -149,7 +183,12 @@ class TurnTiming:
             "llm_provider": self.llm_provider,
             "llm_model": self.llm_model,
             "tts_model": self.tts_model,
+            "tts_provider": self.tts_provider,
             "voice_id": self.voice_id,
+            "stt_language": self.stt_language,
+            "stt_confidence": self.stt_confidence,
+            "tts_attempted_providers": self.tts_attempted_providers,
+            "tts_fallback_active": self.tts_fallback_active,
             "run_id": self.run_id,
             "interrupted": self.interrupted,
             "tools_used": self.tools_used,
@@ -297,8 +336,25 @@ class VoicePipelineServer:
     def __init__(self, cfg: dict):
         self.cfg = cfg
         self.turn_counter = 0
-        self.hermes = HermesAPI(cfg)
+        brain_provider = str(
+            (cfg.get("brain") or {}).get("provider")
+            or cfg.get("llm", {}).get("provider", "hermes")
+        ).lower()
+        if brain_provider == "gbrain":
+            self.brain = GbrainAdapter(cfg)
+        elif brain_provider == "hermes":
+            self.brain = HermesAdapter(cfg)
+        else:
+            self.brain = None
+        # Compatibility for stop/approval call sites while the external
+        # WebSocket protocol remains provider-neutral.
+        self.hermes = self.brain
         self.stt_lock = asyncio.Lock()
+        self._tts_provider: TTSProvider | None = None
+        self.pronunciations = PronunciationDictionary(
+            (cfg.get("voice") or {}).get("pronunciations") or {}
+        )
+        stt_language = cfg["stt"].get("language", "en")
         self.recorder = AudioToTextRecorder(
             model=cfg["stt"]["model"],
             use_microphone=False,
@@ -306,7 +362,7 @@ class VoicePipelineServer:
             device=cfg["stt"].get("device", "cpu"),
             compute_type=cfg["stt"].get("compute_type", "int8"),
             sample_rate=int(cfg["stt"].get("sample_rate", 16000)),
-            language="en",
+            language=stt_language,
             beam_size=1,
             faster_whisper_vad_filter=False,
             no_log_file=True,
@@ -322,10 +378,14 @@ class VoicePipelineServer:
         # 1) GPU worker (if configured and reachable) — big model, ~0.3s
         remote = self.cfg["stt"].get("remote") or {}
         if remote.get("url"):
-            text = await asyncio.to_thread(self._remote_stt, audio, remote)
-            if text is not None:
+            result = await asyncio.to_thread(self._remote_stt, audio, remote)
+            if result is not None:
+                text, confidence, language = result
                 if timing:
                     timing.stt_model = f"remote:{remote.get('name', 'gpu')}"
+                    timing.stt_confidence = confidence
+                    if language:
+                        timing.stt_language = language
                     timing.stt_final_monotonic = time.perf_counter()
                 return text
         # 2) local Whisper fallback
@@ -345,7 +405,9 @@ class VoicePipelineServer:
             timing.stt_final_monotonic = time.perf_counter()
         return (text or "").strip()
 
-    def _remote_stt(self, audio: bytes, remote: dict) -> str | None:
+    def _remote_stt(
+        self, audio: bytes, remote: dict,
+    ) -> tuple[str, float | None, str | None] | None:
         """POST raw PCM to the GPU STT worker. None = unavailable (use fallback)."""
         headers = {"Content-Type": "application/octet-stream"}
         token = os.environ.get(remote.get("token_env", "JARVIS_HUD_TOKEN"), "")
@@ -355,7 +417,13 @@ class VoicePipelineServer:
             r = requests.post(remote["url"], data=audio, headers=headers,
                               timeout=float(remote.get("timeout", 6)))
             if r.ok:
-                return (r.json().get("text") or "").strip()
+                payload = r.json()
+                confidence = payload.get("confidence")
+                return (
+                    (payload.get("text") or "").strip(),
+                    float(confidence) if confidence is not None else None,
+                    payload.get("language"),
+                )
         except Exception:
             pass
         return None
@@ -363,23 +431,37 @@ class VoicePipelineServer:
     # ------------------------------------------------------------------ LLM
 
     def stream_llm_events_sync(
-        self, transcript: str, timing: TurnTiming, conversation: str,
+        self,
+        transcript: str,
+        timing: TurnTiming,
+        conversation: str,
+        cancellation: CancellationToken,
     ) -> Iterator[tuple[str, str]]:
         llm = self.cfg["llm"]
-        provider = llm["provider"]
+        provider = str(
+            (self.cfg.get("brain") or {}).get("provider") or llm["provider"]
+        ).lower()
         timing.llm_start_monotonic = time.perf_counter()
-        if provider == "hermes":
+        if provider in {"hermes", "gbrain"}:
             try:
-                h = self.cfg.get("hermes") or {}
-                session_id = self.hermes.get_session_id(conversation)
-                gen = self._hermes_turn(session_id, transcript, timing, h, conversation)
+                brain_cfg = self.cfg.get(provider) or {}
+                assert self.brain is not None
+                session_id = self.brain.get_session_id(conversation)
+                gen = self._brain_turn(
+                    session_id,
+                    transcript,
+                    timing,
+                    brain_cfg,
+                    conversation,
+                    cancellation,
+                )
                 first = next(gen)
             except StopIteration:
                 return
             except Exception as exc:
-                fb = (self.cfg.get("hermes") or {}).get("fallback_provider", "anthropic")
-                print(f"Hermes unavailable ({type(exc).__name__}: {exc}); fallback={fb}", flush=True)
-                timing.errors.append(f"hermes_fallback: {exc}")
+                fb = brain_cfg.get("fallback_provider", "anthropic")
+                print(f"{provider} unavailable ({type(exc).__name__}: {exc}); fallback={fb}", flush=True)
+                timing.errors.append(f"{provider}_fallback: {exc}")
                 if not fb:
                     raise
                 yield ("text", "Agent backend offline. Running in basic mode. ")
@@ -402,79 +484,122 @@ class VoicePipelineServer:
                 system=self.cfg["persona"]["system_prompt"],
                 messages=[{"role": "user", "content": transcript}],
             ) as stream:
-                for text in stream.text_stream:
-                    if text and timing.llm_first_token_monotonic is None:
-                        timing.llm_first_token_monotonic = time.perf_counter()
-                    yield ("text", text)
+                close_stream = getattr(stream, "close", None)
+                unsubscribe = (
+                    cancellation.register(close_stream)
+                    if callable(close_stream)
+                    else lambda: None
+                )
+                try:
+                    for text in stream.text_stream:
+                        if cancellation.cancelled:
+                            break
+                        if text and timing.llm_first_token_monotonic is None:
+                            timing.llm_first_token_monotonic = time.perf_counter()
+                        yield ("text", text)
+                finally:
+                    unsubscribe()
         else:
             raise RuntimeError(f"Unsupported LLM provider: {provider}")
 
-    def _hermes_turn(
-        self, session_id: str, transcript: str, timing: TurnTiming, h: dict, conversation: str,
+    def _brain_turn(
+        self,
+        session_id: str,
+        transcript: str,
+        timing: TurnTiming,
+        brain_cfg: dict,
+        conversation: str,
+        cancellation: CancellationToken,
     ) -> Iterator[tuple[str, str]]:
-        timing.llm_provider = "hermes"
-        timing.llm_model = "hermes-agent"
-        timeout = float(h.get("timeout", 240))
+        assert self.brain is not None
+        timing.llm_provider = self.brain.provider
+        timing.llm_model = str(brain_cfg.get("model") or f"{self.brain.provider}-agent")
+        timeout = float(brain_cfg.get("timeout", 240))
         try:
-            it = self.hermes.chat_stream_events(session_id, transcript, timeout)
+            it = self.brain.chat_stream_events(
+                session_id, transcript, timeout, cancellation,
+            )
             for kind, value in it:
                 if kind == "text" and timing.llm_first_token_monotonic is None:
                     timing.llm_first_token_monotonic = time.perf_counter()
+                if kind == "final":
+                    record_brain_usage(json.loads(value))
                 yield (kind, value)
         except RuntimeError as exc:
             # stale session id (e.g. Hermes DB reset) -> recreate once
             if "404" in str(exc):
-                session_id = self.hermes.get_session_id(conversation, force_new=True)
-                for kind, value in self.hermes.chat_stream_events(session_id, transcript, timeout):
+                session_id = self.brain.get_session_id(conversation, force_new=True)
+                for kind, value in self.brain.chat_stream_events(
+                    session_id, transcript, timeout, cancellation,
+                ):
                     if kind == "text" and timing.llm_first_token_monotonic is None:
                         timing.llm_first_token_monotonic = time.perf_counter()
+                    if kind == "final":
+                        record_brain_usage(json.loads(value))
                     yield (kind, value)
             else:
                 raise
 
     # ------------------------------------------------------------------ TTS
 
-    def tts_chunks_sync(self, text: str, timing: TurnTiming) -> Iterator[bytes]:
-        voice = self.cfg["voice"]
-        key = os.environ.get("ELEVENLABS_API_KEY") or os.environ.get("ELEVEN_API_KEY") or os.environ.get("XI_API_KEY")
-        if not key:
-            raise RuntimeError("ElevenLabs API key not found")
-        timing.tts_model = voice["model"]
-        timing.voice_id = voice["voice_id"]
+    def _get_tts_provider(self) -> TTSProvider:
+        if self._tts_provider is None:
+            self._tts_provider = create_tts_provider(
+                self.cfg["voice"], metrics_hook=self._record_tts_metrics,
+            )
+        return self._tts_provider
+
+    @staticmethod
+    def _record_tts_metrics(metrics: TTSMetrics) -> None:
+        """Provider-neutral local usage accounting."""
+        if not metrics.cancelled and metrics.error is None:
+            record_usage(tts_chars=metrics.characters)
+
+    def tts_chunks_sync(
+        self,
+        text: str,
+        timing: TurnTiming,
+        cancellation: CancellationToken | None = None,
+    ) -> Iterator[bytes]:
+        provider = self._get_tts_provider()
+        timing.tts_provider = provider.name
+        timing.tts_model = provider.model
+        timing.voice_id = provider.voice_id
         timing.tts_request_start_monotonic = timing.tts_request_start_monotonic or time.perf_counter()
-        record_usage(tts_chars=len(text))
-        url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice['voice_id']}/stream"
-        params = {"output_format": voice.get("output_format", "pcm_16000")}
-        payload = {
-            "text": text,
-            "model_id": voice["model"],
-            "voice_settings": {
-                "stability": 0.55, "similarity_boost": 0.70,
-                "style": 0.10, "use_speaker_boost": True,
-            },
-        }
-        response = requests.post(
-            url, params=params,
-            headers={"xi-api-key": key, "Accept": "application/octet-stream", "Content-Type": "application/json"},
-            json=payload, stream=True, timeout=120,
-        )
-        if response.status_code >= 400:
-            response.close()
-            raise RuntimeError(f"ElevenLabs HTTP {response.status_code}: {response.text[:1000]}")
-        try:
-            for chunk in response.iter_content(chunk_size=4096):
-                if not chunk:
-                    continue
-                if timing.first_tts_audio_byte_monotonic is None:
-                    timing.first_tts_audio_byte_monotonic = time.perf_counter()
-                yield chunk
-        finally:
-            response.close()  # barge-in cancels mid-stream; don't leak the connection
+        for chunk in provider.stream(text, cancellation):
+            served_provider = getattr(provider, "served_provider", None)
+            attempted = list(getattr(provider, "attempted_providers", ()) or ())
+            if served_provider:
+                timing.tts_provider = served_provider
+                timing.tts_attempted_providers = attempted
+                timing.tts_fallback_active = len(attempted) > 1
+                selected = next(
+                    (
+                        candidate
+                        for candidate in (
+                            getattr(provider, "primary", None),
+                            getattr(provider, "fallback", None),
+                        )
+                        if candidate is not None and candidate.name == served_provider
+                    ),
+                    None,
+                )
+                if selected is not None:
+                    timing.tts_model = selected.model
+                    timing.voice_id = selected.voice_id
+            if timing.first_tts_audio_byte_monotonic is None:
+                timing.first_tts_audio_byte_monotonic = time.perf_counter()
+            yield chunk
 
     # ------------------------------------------------------------- Turn flow
 
     async def stream_response_audio(
-        self, ws: WebSocket, transcript: str, timing: TurnTiming, conn: "ConnState",
+        self,
+        ws: WebSocket,
+        transcript: str,
+        timing: TurnTiming,
+        conn: "ConnState",
+        cancellation: CancellationToken,
     ) -> None:
         pending = ""
         full_response: list[str] = []
@@ -485,7 +610,9 @@ class VoicePipelineServer:
 
         async def forward() -> None:
             try:
-                async for item in self._async_llm_events(transcript, timing, conn.conversation):
+                async for item in self._async_llm_events(
+                    transcript, timing, conn.conversation, cancellation,
+                ):
                     await q.put(item)
                 await q.put(None)
             except Exception as exc:
@@ -512,8 +639,23 @@ class VoicePipelineServer:
                                         "tool": info.get("name"), "preview": info.get("preview", "")})
                     continue
                 if kind == "approval":
-                    await ws.send_json({"type": "approval_request", "data": json.loads(value),
+                    info = json.loads(value)
+                    conn.pending_approval = {
+                        "run_id": conn.current_run_id,
+                        "approval_id": info.get("approval_id") or info.get("id"),
+                    }
+                    await ws.send_json({"type": "approval_request", "data": info,
                                         "run_id": conn.current_run_id})
+                    self._arm_approval_timeout(ws, conn)
+                    if (self.cfg.get("voice") or {}).get("speak_approvals", True):
+                        await ws.send_json({"type": "agent_status", "state": "speaking"})
+                        await self._speak_segment(
+                            ws,
+                            "Approval required. Review the request on screen.",
+                            timing,
+                            conn,
+                            cancellation,
+                        )
                     continue
                 if kind == "final":
                     info = json.loads(value)
@@ -532,26 +674,34 @@ class VoicePipelineServer:
                     if not spoken:
                         await ws.send_json({"type": "agent_status", "state": "speaking"})
                         spoken = True
-                    conn.spoken_sentences.append(clean)
-                    await self._send_tts_sentence(ws, clean, timing)
+                    await self._speak_segment(
+                        ws, clean, timing, conn, cancellation,
+                    )
             tail = self._clean_for_tts(pending.strip())
             if tail:
-                conn.spoken_sentences.append(tail)
-                await self._send_tts_sentence(ws, tail, timing)
+                await self._speak_segment(
+                    ws, tail, timing, conn, cancellation,
+                )
         finally:
             if not forward_task.done():
                 forward_task.cancel()
         timing.response_text = "".join(full_response).strip()
 
     async def _async_llm_events(
-        self, transcript: str, timing: TurnTiming, conversation: str,
+        self,
+        transcript: str,
+        timing: TurnTiming,
+        conversation: str,
+        cancellation: CancellationToken,
     ) -> AsyncIterator[tuple[str, str]]:
         q: asyncio.Queue = asyncio.Queue()
         loop = asyncio.get_running_loop()
 
         def worker() -> None:
             try:
-                for item in self.stream_llm_events_sync(transcript, timing, conversation):
+                for item in self.stream_llm_events_sync(
+                    transcript, timing, conversation, cancellation,
+                ):
                     loop.call_soon_threadsafe(q.put_nowait, item)
                 loop.call_soon_threadsafe(q.put_nowait, None)
             except Exception as exc:
@@ -567,7 +717,13 @@ class VoicePipelineServer:
             yield item
         await worker_task
 
-    async def _send_tts_sentence(self, ws: WebSocket, sentence: str, timing: TurnTiming) -> None:
+    async def _send_tts_sentence(
+        self,
+        ws: WebSocket,
+        sentence: str,
+        timing: TurnTiming,
+        cancellation: CancellationToken,
+    ) -> None:
         if not sentence:
             return
         q: asyncio.Queue = asyncio.Queue()
@@ -575,7 +731,7 @@ class VoicePipelineServer:
 
         def worker() -> None:
             try:
-                for chunk in self.tts_chunks_sync(sentence, timing):
+                for chunk in self.tts_chunks_sync(sentence, timing, cancellation):
                     loop.call_soon_threadsafe(q.put_nowait, chunk)
                 loop.call_soon_threadsafe(q.put_nowait, None)
             except Exception as exc:
@@ -591,17 +747,90 @@ class VoicePipelineServer:
             await ws.send_bytes(item)
         await worker_task
 
-    @staticmethod
-    def _extract_complete_sentences(text: str) -> tuple[list[str], str]:
-        sentences = []
-        last_end = 0
-        for match in SENTENCE_RE.finditer(text):
-            sentences.append(match.group(1).strip())
-            last_end = match.end()
-        return sentences, text[last_end:]
+    async def _speak_segment(
+        self,
+        ws: WebSocket,
+        sentence: str,
+        timing: TurnTiming,
+        conn: "ConnState",
+        cancellation: CancellationToken,
+    ) -> None:
+        """Frame raw audio with text metadata so the HUD can acknowledge playback."""
+        conn.segment_counter += 1
+        segment_id = f"{timing.turn_id}:{conn.segment_counter}"
+        conn.pending_segments[segment_id] = sentence
+        conn.spoken_sentences.append(sentence)
+        await ws.send_json({
+            "type": "speech_segment",
+            "segment_id": segment_id,
+            "text": sentence,
+        })
+        await self._send_tts_sentence(ws, sentence, timing, cancellation)
+        if not cancellation.cancelled:
+            await ws.send_json({
+                "type": "speech_segment_end",
+                "segment_id": segment_id,
+            })
+
+    def _arm_approval_timeout(self, ws: WebSocket, conn: "ConnState") -> None:
+        """Default-deny an unattended founder-local approval request."""
+        if conn.approval_timeout_task and not conn.approval_timeout_task.done():
+            conn.approval_timeout_task.cancel()
+        pending = dict(conn.pending_approval or {})
+        timeout = float(
+            (self.cfg.get("security") or {}).get("approval_timeout_seconds", 60)
+        )
+
+        async def deny_later() -> None:
+            try:
+                await asyncio.sleep(max(1, timeout))
+                if conn.pending_approval != pending or self.brain is None:
+                    return
+                run_id = str(pending.get("run_id") or "")
+                approval_id = str(pending.get("approval_id") or "")
+                if run_id:
+                    await asyncio.to_thread(
+                        self.brain.submit_approval,
+                        run_id,
+                        approval_id,
+                        "deny",
+                    )
+                conn.pending_approval = None
+                await ws.send_json({
+                    "type": "status",
+                    "message": "Approval timed out and was denied.",
+                })
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:
+                try:
+                    await ws.send_json({
+                        "type": "status",
+                        "message": f"Approval timeout failed safely: {exc}",
+                    })
+                except Exception:
+                    pass
+
+        conn.approval_timeout_task = asyncio.create_task(deny_later())
 
     @staticmethod
-    def _clean_for_tts(text: str) -> str:
+    def _extract_complete_sentences(text: str) -> tuple[list[str], str]:
+        segments: list[str] = []
+        remaining = text
+        while remaining:
+            sentence = SENTENCE_RE.search(remaining)
+            clause = CLAUSE_RE.search(remaining)
+            candidates = [match for match in (sentence, clause) if match is not None]
+            if not candidates:
+                break
+            match = min(candidates, key=lambda item: item.end())
+            segment = match.group(1).strip()
+            if segment:
+                segments.append(segment)
+            remaining = remaining[match.end():]
+        return segments, remaining
+
+    def _clean_for_tts(self, text: str) -> str:
         if not text:
             return ""
         text = THINK_RE.sub("", text)
@@ -613,7 +842,7 @@ class VoicePipelineServer:
         text = re.sub(r"^[\s>*#-]+", "", text)
         text = re.sub(r"[*_#]{1,3}([^*_#]+)[*_#]{1,3}", r"\1", text)
         text = re.sub(r"\s+", " ", text).strip()
-        return text
+        return self.pronunciations.normalize(text)
 
     def log_turn(self, timing: TurnTiming) -> None:
         timing.total_done_monotonic = timing.total_done_monotonic or time.perf_counter()
@@ -627,6 +856,11 @@ class VoicePipelineServer:
 load_env()
 CFG = load_config()
 HERMES = HermesAPI(CFG)   # lightweight API client - independent of the STT pipeline
+BRAIN_PROVIDER = str(
+    (CFG.get("brain") or {}).get("provider")
+    or CFG.get("llm", {}).get("provider", "hermes")
+).lower()
+BRAIN = GbrainAdapter(CFG) if BRAIN_PROVIDER == "gbrain" else HermesAdapter(CFG)
 PIPELINE: VoicePipelineServer | None = None
 
 
@@ -645,10 +879,6 @@ def get_pipeline() -> VoicePipelineServer:
     return PIPELINE
 
 
-app = FastAPI(title="Hermes Voice Pipeline")
-
-
-@app.on_event("startup")
 async def warm_pipeline() -> None:
     """Warm the local Whisper fallback in the BACKGROUND, exactly once (this
     hook fires once per uvicorn listener — there are four), and never let a
@@ -669,6 +899,15 @@ async def warm_pipeline() -> None:
 
 
 _WARM_STARTED = False
+
+
+@asynccontextmanager
+async def app_lifespan(_app: FastAPI):
+    await warm_pipeline()
+    yield
+
+
+app = FastAPI(title="Hermes Voice Pipeline", lifespan=app_lifespan)
 
 
 # ------------------------------------------------------------------ Auth
@@ -753,20 +992,21 @@ async def hermes_proxy(path: str, request: Request) -> Response:
 
 @app.post("/api/chat")
 async def hud_chat(request: Request) -> JSONResponse:
-    """Typed chat from the HUD — same Hermes session as voice."""
+    """Typed chat from the HUD — same selected brain session as voice."""
     body = await request.json()
     text = (body.get("input") or "").strip()
-    conversation = body.get("conversation") or (CFG.get("hermes") or {}).get("conversation", "jarvis-main")
+    selected_brain_cfg = CFG.get(BRAIN_PROVIDER) or {}
+    conversation = body.get("conversation") or selected_brain_cfg.get("conversation", "jarvis-main")
     if not text:
         return JSONResponse({"error": "empty input"}, status_code=400)
     out: dict = {"text": "", "tools": [], "run_id": None}
 
     def run_sync() -> None:
-        timeout = float((CFG.get("hermes") or {}).get("timeout", 240))
+        timeout = float(selected_brain_cfg.get("timeout", 240))
 
         def consume(sid: str) -> list[str]:
             parts: list[str] = []
-            for kind, value in HERMES.chat_stream_events(sid, text, timeout):
+            for kind, value in BRAIN.chat_stream_events(sid, text, timeout):
                 if kind == "text":
                     parts.append(value)
                 elif kind == "tool":
@@ -775,18 +1015,19 @@ async def hud_chat(request: Request) -> JSONResponse:
                     out["run_id"] = value
                 elif kind == "final":
                     info = json.loads(value)
+                    record_brain_usage(info)
                     if info.get("content"):
                         parts = [info["content"]]
             return parts
 
         try:
-            parts = consume(HERMES.get_session_id(conversation))
+            parts = consume(BRAIN.get_session_id(conversation))
         except RuntimeError as exc:
             if "404" not in str(exc):
                 raise
             # stale session id (e.g. profile switch / DB reset) -> recreate once
             out["tools"].clear()
-            parts = consume(HERMES.get_session_id(conversation, force_new=True))
+            parts = consume(BRAIN.get_session_id(conversation, force_new=True))
         out["text"] = "".join(parts).strip()
 
     try:
@@ -796,12 +1037,44 @@ async def hud_chat(request: Request) -> JSONResponse:
         return JSONResponse({"error": str(exc)}, status_code=502)
 
 
+@app.get("/api/brain/capabilities")
+async def brain_capabilities() -> JSONResponse:
+    """Founder-local capability snapshot for the selected brain adapter."""
+    try:
+        if BRAIN.provider == "hermes":
+            health = await asyncio.to_thread(
+                requests.get,
+                f"{HERMES.base}/health",
+                headers=HERMES.headers(),
+                timeout=5,
+            )
+            health.raise_for_status()
+        caps = await asyncio.to_thread(BRAIN.discover_capabilities)
+        return JSONResponse({
+            "provider": BRAIN.provider,
+            "online": True,
+            "capabilities": {
+                "streaming": caps.streaming,
+                "sessions": caps.sessions,
+                "stop": caps.stop,
+                "approvals": caps.approvals,
+                "memory": caps.memory,
+                "extra": sorted(caps.extra),
+            },
+        })
+    except Exception as exc:
+        return JSONResponse(
+            {"provider": BRAIN.provider, "online": False, "error": str(exc)},
+            status_code=503,
+        )
+
+
 _ELEVEN_CACHE: dict = {"ts": 0.0, "data": None}
 
 
 @app.get("/api/usage")
 async def usage() -> JSONResponse:
-    """LLM token usage (local tally) + ElevenLabs subscription quota."""
+    """Provider-neutral local usage plus optional ElevenLabs quota."""
     u = read_usage()
     cost_cfg = CFG.get("usage") or {}
     cin = float(cost_cfg.get("llm_cost_per_mtok_input", 0) or 0)
@@ -812,10 +1085,17 @@ async def usage() -> JSONResponse:
             return None
         return round(b.get("llm_in", 0) / 1e6 * cin + b.get("llm_out", 0) / 1e6 * cout, 4)
 
+    configured_voice = str((CFG.get("voice") or {}).get("provider", "elevenlabs"))
     out = {
         "llm": {
             "today": u["today"], "total": u["total"],
             "today_cost": est(u["today"]), "total_cost": est(u["total"]),
+        },
+        "voice_provider": configured_voice,
+        "voice_usage": {
+            "provider": configured_voice,
+            "used": u["today"].get("tts_chars", 0),
+            "unit": "characters",
         },
         "elevenlabs": None,
     }
@@ -854,6 +1134,12 @@ async def usage() -> JSONResponse:
 
             asyncio.get_running_loop().create_task(refresh())
     out["elevenlabs"] = _ELEVEN_CACHE["data"]
+    if configured_voice == "elevenlabs" and _ELEVEN_CACHE["data"]:
+        out["voice_usage"] = {
+            "provider": "elevenlabs",
+            **_ELEVEN_CACHE["data"],
+            "unit": "characters",
+        }
     return JSONResponse(out)
 
 
@@ -1050,17 +1336,65 @@ class ConnState:
     interrupt_note: str | None = None
     partial_task: asyncio.Task | None = None
     last_partial_bytes: int = 0
+    cancellation: CancellationToken | None = None
+    pending_segments: dict[str, str] = field(default_factory=dict)
+    last_played_sentence: str | None = None
+    segment_counter: int = 0
+    pending_approval: dict | None = None
+    approval_timeout_task: asyncio.Task | None = None
+    review_id: str | None = None
+    review_future: asyncio.Future | None = None
 
 
 async def _run_turn(ws: WebSocket, pipeline: VoicePipelineServer, conn: ConnState) -> None:
     timing = conn.timing
     assert timing is not None
+    cancellation = conn.cancellation or CancellationToken()
     audio = b"".join(conn.audio_chunks)
     conn.audio_chunks = []
     try:
         transcript = await pipeline.transcribe(audio, timing)
         timing.transcript = transcript
-        await ws.send_json({"type": "transcript", "text": transcript})
+        transcript_event: dict = {"type": "transcript", "text": transcript}
+        review_required = False
+        if timing.stt_confidence is not None:
+            transcript_event["confidence"] = timing.stt_confidence
+            review_required = timing.stt_confidence < float(
+                (pipeline.cfg.get("stt") or {}).get("review_below_confidence", 0.72)
+            )
+            transcript_event["review_required"] = review_required
+        if review_required:
+            review_id = f"{timing.turn_id}:review"
+            transcript_event["review_id"] = review_id
+            conn.review_id = review_id
+            conn.review_future = asyncio.get_running_loop().create_future()
+        await ws.send_json(transcript_event)
+        if review_required and conn.review_future is not None:
+            try:
+                reviewed = await asyncio.wait_for(
+                    asyncio.shield(conn.review_future),
+                    timeout=float(
+                        (pipeline.cfg.get("stt") or {}).get(
+                            "review_timeout_seconds", 20,
+                        )
+                    ),
+                )
+                if isinstance(reviewed, str) and reviewed.strip():
+                    transcript = reviewed.strip()
+                    timing.transcript = transcript
+                    await ws.send_json({
+                        "type": "transcript",
+                        "text": transcript,
+                        "review_applied": True,
+                    })
+            except asyncio.TimeoutError:
+                await ws.send_json({
+                    "type": "status",
+                    "message": "Transcript review timed out; using the original.",
+                })
+            finally:
+                conn.review_future = None
+                conn.review_id = None
         if not transcript:
             await ws.send_json({"type": "error", "message": "No transcript detected."})
         else:
@@ -1073,15 +1407,18 @@ async def _run_turn(ws: WebSocket, pipeline: VoicePipelineServer, conn: ConnStat
             else:
                 transcript_sent = transcript
             conn.spoken_sentences = []
-            await pipeline.stream_response_audio(ws, transcript_sent, timing, conn)
+            await pipeline.stream_response_audio(ws, transcript_sent, timing, conn, cancellation)
             timing.total_done_monotonic = time.perf_counter()
             await ws.send_json({"type": "done", "turn_id": timing.turn_id, "timing": timing.summary()})
     except asyncio.CancelledError:
+        cancellation.cancel()
+        timing.interrupted = True
         timing.errors.append("turn cancelled (barge-in or stop)")
         raise
     except Exception as exc:
         timing.errors.append(f"{type(exc).__name__}: {exc}")
         try:
+            await ws.send_json({"type": "agent_status", "state": "error"})
             await ws.send_json({"type": "error", "message": str(exc)})
         except Exception:
             pass
@@ -1090,6 +1427,8 @@ async def _run_turn(ws: WebSocket, pipeline: VoicePipelineServer, conn: ConnStat
         pipeline.log_turn(timing)
         conn.timing = None
         conn.current_run_id = None
+        if conn.cancellation is cancellation:
+            conn.cancellation = None
 
 
 async def _cancel_active_turn(ws: WebSocket, pipeline: VoicePipelineServer, conn: ConnState,
@@ -1097,23 +1436,35 @@ async def _cancel_active_turn(ws: WebSocket, pipeline: VoicePipelineServer, conn
     run_id = conn.current_run_id  # capture BEFORE cancel: turn cleanup clears it
     turn_was_active = conn.turn_task is not None and not conn.turn_task.done()
     if turn_was_active:
-        if conn.spoken_sentences:
-            conn.interrupt_note = conn.spoken_sentences[-1]
+        if conn.cancellation is not None:
+            conn.cancellation.cancel()
+        if conn.last_played_sentence:
+            conn.interrupt_note = conn.last_played_sentence
         conn.turn_task.cancel()
         try:
             await conn.turn_task
         except (asyncio.CancelledError, Exception):
             pass
+    if conn.approval_timeout_task and not conn.approval_timeout_task.done():
+        conn.approval_timeout_task.cancel()
+    conn.pending_approval = None
+    if conn.review_future and not conn.review_future.done():
+        conn.review_future.cancel()
+    conn.review_future = None
+    conn.review_id = None
     if stop_remote and run_id and turn_was_active:
         conn.current_run_id = None
         try:
-            res = await asyncio.to_thread(pipeline.hermes.stop_run, run_id)
+            assert pipeline.brain is not None
+            res = await asyncio.to_thread(pipeline.brain.stop_run, run_id)
             # 404 = session runs not in the runs registry on this Hermes build;
             # dropping the SSE stream (above) still cuts the turn off.
             msg = "Run halted." if res["status_code"] in (200, 202, 404) else f"Stop returned {res['status_code']}."
             await ws.send_json({"type": "status", "message": msg})
         except Exception as exc:
             await ws.send_json({"type": "status", "message": f"Stop failed: {exc}"})
+    if turn_was_active:
+        await ws.send_json({"type": "agent_status", "state": "interrupted"})
 
 
 def _maybe_schedule_partial(ws: WebSocket, pipeline: VoicePipelineServer, conn: ConnState) -> None:
@@ -1147,8 +1498,24 @@ async def websocket_endpoint(ws: WebSocket) -> None:
     await ws.accept()
     WS_CLIENTS.add(ws)
     pipeline = get_pipeline()
-    conn = ConnState(conversation=(CFG.get("hermes") or {}).get("conversation", "jarvis-main"))
-    await ws.send_json({"type": "status", "message": "Hermes voice server connected."})
+    conn = ConnState(
+        conversation=(CFG.get(BRAIN_PROVIDER) or {}).get("conversation", "jarvis-main")
+    )
+    voice_cfg = CFG.get("voice") or {}
+    brain_cfg = CFG.get(BRAIN_PROVIDER) or {}
+    stt_cfg = CFG.get("stt") or {}
+    await ws.send_json({
+        "type": "status",
+        "message": f"{BRAIN_PROVIDER.title()} voice server connected.",
+        "models": {
+            "brain": brain_cfg.get("model") or f"{BRAIN_PROVIDER}-agent",
+            "stt": stt_cfg.get("model", "unknown"),
+            "tts_provider": voice_cfg.get("provider", "elevenlabs"),
+            "tts": voice_cfg.get("model", "unknown"),
+            "language": stt_cfg.get("language", "en"),
+            "fallback": brain_cfg.get("fallback_provider") or "disabled",
+        },
+    })
     try:
         while True:
             message = await ws.receive()
@@ -1161,10 +1528,15 @@ async def websocket_endpoint(ws: WebSocket) -> None:
                         conn.conversation = str(event["conversation"])
                     conn.audio_chunks = []
                     conn.last_partial_bytes = 0
+                    conn.pending_segments.clear()
+                    conn.last_played_sentence = None
+                    conn.segment_counter = 0
                     conn.recording = True
                     conn.timing = TurnTiming(turn_id=pipeline.next_turn_id())
+                    conn.cancellation = CancellationToken()
                     conn.timing.audio_start_monotonic = time.perf_counter()
                     conn.timing.stt_model = CFG["stt"]["model"]
+                    conn.timing.stt_language = str(CFG["stt"].get("language", "en"))
                     await ws.send_json({"type": "status", "message": f"Turn {conn.timing.turn_id} recording started."})
                 elif etype == "stop":
                     if conn.timing is None:
@@ -1172,6 +1544,7 @@ async def websocket_endpoint(ws: WebSocket) -> None:
                         continue
                     conn.recording = False
                     conn.timing.end_of_speech_monotonic = time.perf_counter()
+                    await ws.send_json({"type": "agent_status", "state": "transcribing"})
                     conn.turn_task = asyncio.create_task(_run_turn(ws, pipeline, conn))
                 elif etype == "stop_run":
                     await _cancel_active_turn(ws, pipeline, conn)
@@ -1187,8 +1560,24 @@ async def websocket_endpoint(ws: WebSocket) -> None:
                         "approved": decision == "allow",
                         "approval_id": event.get("approval_id"),
                     }
-                    res = await asyncio.to_thread(pipeline.hermes.post_approval, run_id, body)
+                    assert pipeline.brain is not None
+                    res = await asyncio.to_thread(pipeline.brain.post_approval, run_id, body)
+                    if conn.approval_timeout_task and not conn.approval_timeout_task.done():
+                        conn.approval_timeout_task.cancel()
+                    conn.pending_approval = None
                     await ws.send_json({"type": "status", "message": f"Approval sent ({res['status_code']})."})
+                elif etype == "speech_played":
+                    segment_id = str(event.get("segment_id") or "")
+                    played = conn.pending_segments.pop(segment_id, None)
+                    if played:
+                        conn.last_played_sentence = played
+                elif etype == "transcript_review":
+                    if (
+                        conn.review_future is not None
+                        and not conn.review_future.done()
+                        and event.get("review_id") == conn.review_id
+                    ):
+                        conn.review_future.set_result(str(event.get("text") or ""))
                 else:
                     await ws.send_json({"type": "error", "message": f"Unknown event type: {etype}"})
             elif "bytes" in message and message["bytes"] is not None:
@@ -1198,6 +1587,10 @@ async def websocket_endpoint(ws: WebSocket) -> None:
     except WebSocketDisconnect:
         if conn.turn_task and not conn.turn_task.done():
             conn.turn_task.cancel()
+        if conn.approval_timeout_task and not conn.approval_timeout_task.done():
+            conn.approval_timeout_task.cancel()
+        if conn.review_future and not conn.review_future.done():
+            conn.review_future.cancel()
         print("Client disconnected", flush=True)
     finally:
         WS_CLIENTS.discard(ws)

@@ -84,6 +84,34 @@ button.btn.danger{color:var(--red); border-color:#7a2a33; background:#240a0e}
 button.btn.danger:hover{background:#3a0e15; box-shadow:0 0 10px #ff4d5e55}
 button.btn.amber{color:var(--amber); border-color:#7a5a1a; background:#241c0a}
 #stopBtn{display:none}
+.controlGrid{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:8px}
+.field{display:flex;flex-direction:column;gap:3px;min-width:0}
+.field label{font-family:'Orbitron';font-size:8px;letter-spacing:1.5px;color:var(--txt-dim)}
+.field select{
+  width:100%;min-width:0;background:#06101c;border:1px solid var(--line);color:var(--txt);
+  padding:5px 6px;font-family:'Rajdhani';font-size:12px;outline:none
+}
+.field select:focus{border-color:var(--cyan);box-shadow:0 0 7px #00e5ff33}
+.endpointControls{border-top:1px solid var(--line);margin-top:8px;padding-top:7px}
+.endpointToggle{display:flex;align-items:center;gap:7px;font-family:'Orbitron';font-size:9px;letter-spacing:1.2px;color:var(--txt)}
+.endpointToggle input{accent-color:var(--cyan)}
+.endpointSettings{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:6px}
+.endpointSettings input{width:100%;background:#06101c;border:1px solid var(--line);color:var(--txt);padding:5px 6px;font:12px 'Rajdhani'}
+.endpointSettings input:disabled{opacity:.45}
+#endpointStatus{display:block;margin-top:4px;font-size:10px;color:var(--txt-dim)}
+.meterRow{display:grid;grid-template-columns:44px 1fr 32px;align-items:center;gap:6px;font-size:11px;color:var(--txt-dim);margin-top:4px}
+.meterRow .bar{margin:0;height:4px}
+.meterRow output{text-align:right;color:var(--teal)}
+#voiceStateBadge{font-family:'Orbitron';font-size:9px;letter-spacing:1.5px;color:var(--cyan)}
+#transcriptReview{display:none;width:calc(100% - 20px);max-width:660px;border:1px solid var(--amber);background:#1a1305e8;padding:9px 10px;margin:4px 10px;box-shadow:0 0 18px #ffb30026}
+#transcriptReview.open{display:block}
+#transcriptReview label{display:block;font-family:'Orbitron';font-size:9px;letter-spacing:2px;color:var(--amber);margin-bottom:5px}
+#reviewText{width:100%;resize:vertical;min-height:46px;background:#0c1118;border:1px solid #73581d;color:#ffe4aa;padding:7px;font-family:'Rajdhani';font-size:14px}
+#reviewText:focus{outline:1px solid var(--amber)}
+.reviewActions{display:flex;align-items:center;gap:7px;margin-top:6px}
+#reviewConfidence{margin-right:auto;font-size:11px;color:#d6a84b}
+.sr-only{position:absolute!important;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+:focus-visible{outline:2px solid var(--cyan);outline-offset:2px}
 #approvals{position:absolute; top:8px; left:50%; transform:translateX(-50%); z-index:20; width:min(560px,92%); display:flex; flex-direction:column; gap:8px}
 .appr{border:1px solid var(--amber); background:#1a1305f2; padding:12px 14px;
   box-shadow:0 0 24px #ffb30044; animation:apprIn .25s ease-out}
@@ -232,6 +260,13 @@ footer{
 }
 .bar{height:3px; background:#0a2435; margin-top:3px}
 .bar i{display:block; height:100%; background:linear-gradient(90deg,var(--cyan-dim),var(--cyan)); width:0%; transition:width .4s}
+body[data-voice-state="error"] #coreState .st{color:var(--red)}
+body[data-voice-state="interrupted"] #coreState .st,
+body[data-voice-state="stopped"] #coreState .st{color:var(--amber)}
+@media (prefers-reduced-motion:reduce){
+  *,*::before,*::after{animation-duration:.001ms!important;animation-iteration-count:1!important;scroll-behavior:auto!important;transition-duration:.001ms!important}
+  body::after{display:none}
+}
 </style>
 </head>
 <body>
@@ -260,15 +295,28 @@ footer{
     <div class="panel"><h2><span>VOICE LINK</span><span class="num">01</span></h2>
       <div class="kv"><span><span class="dot" id="wsDot"></span>Socket</span><b id="wsState">offline</b></div>
       <div class="kv"><span><span class="dot" id="micDot"></span>Microphone</span><b id="micState">idle</b></div>
-      <div class="kv"><span>Input level</span><b>&nbsp;</b></div>
-      <div class="bar"><i id="levelBar"></i></div>
+      <div class="kv"><span>Voice state</span><b id="voiceStateBadge">IDLE</b></div>
+      <div class="meterRow"><span>INPUT</span><div class="bar" role="meter" aria-label="Microphone input level" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="inputMeter"><i id="levelBar"></i></div><output id="inputLevel">0%</output></div>
+      <div class="meterRow"><span>OUTPUT</span><div class="bar" role="meter" aria-label="Speech output level" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="outputMeter"><i id="outputBar"></i></div><output id="outputLevel">0%</output></div>
+      <div class="controlGrid">
+        <div class="field"><label for="micSelect">MICROPHONE</label><select id="micSelect" aria-label="Microphone device"><option value="">System default</option></select></div>
+        <div class="field"><label for="speakerSelect">SPEAKER</label><select id="speakerSelect" aria-label="Speaker device"><option value="">System default</option></select></div>
+      </div>
+      <div class="endpointControls">
+        <label class="endpointToggle" for="autoEndpoint"><input type="checkbox" id="autoEndpoint"> AUTO-SEND AFTER SILENCE</label>
+        <div class="endpointSettings">
+          <div class="field"><label for="minSpeechMs">MIN SPEECH (MS)</label><input id="minSpeechMs" type="number" min="160" max="5000" step="80" value="480" inputmode="numeric"></div>
+          <div class="field"><label for="silenceMs">SILENCE (MS)</label><input id="silenceMs" type="number" min="400" max="5000" step="100" value="1200" inputmode="numeric"></div>
+        </div>
+        <span id="endpointStatus">Manual stop active · auto-send off</span>
+      </div>
       <div style="margin-top:8px; display:flex; gap:6px">
         <button class="btn" id="talkBtn" style="flex:1">ENGAGE VOICE</button>
         <button class="btn danger" id="stopBtn">■ STOP</button>
       </div>
     </div>
     <div class="panel"><h2><span>AGENT ACTIVITY</span><span class="num">02</span></h2>
-      <div id="activity"><div>— no activity yet —</div></div>
+      <div id="activity" role="log" aria-label="Agent activity"><div>— no activity yet —</div></div>
     </div>
     <div class="panel"><h2><span>TURN METRICS</span><span class="num">03</span></h2>
       <div class="kv"><span>Turns</span><b id="mTurns">0</b></div>
@@ -292,12 +340,19 @@ footer{
   <!-- CENTER -->
   <div id="center">
     <div id="approvals"></div>
-    <div id="reactorWrap" title="Click to talk">
-      <canvas id="reactor"></canvas>
+    <div id="reactorWrap" title="Click to talk" role="button" tabindex="0" aria-label="Start voice input" aria-pressed="false">
+      <canvas id="reactor" aria-hidden="true"></canvas>
       <div id="coreState"><div class="st" id="stateLabel">STANDBY</div><div class="hint" id="stateHint">CLICK RING OR SPACE TO TALK</div></div>
     </div>
-    <div id="feed"></div>
+    <div id="voiceStatus" class="sr-only" role="status" aria-live="polite">Voice state idle</div>
+    <div id="feed" role="log" aria-label="Conversation" aria-live="polite"></div>
+    <div id="transcriptReview" role="region" aria-labelledby="reviewLabel">
+      <label id="reviewLabel" for="reviewText">LOW-CONFIDENCE TRANSCRIPT — REVIEW</label>
+      <textarea id="reviewText"></textarea>
+      <div class="reviewActions"><span id="reviewConfidence">Confidence unavailable</span><button class="btn" id="reviewAccept">USE EDIT</button><button class="btn danger" id="reviewDismiss">DISMISS</button></div>
+    </div>
     <div id="chatRow">
+      <label for="chatInput" class="sr-only">Message agent</label>
       <input id="chatInput" placeholder="Type to Hermes… (/new resets · voice: click the ring)" autocomplete="off">
       <button class="btn" id="sendBtn">SEND</button>
       <button class="btn" id="clearBtn" title="Clear the visible chat (history stays in Hermes)">CLR</button>
@@ -307,15 +362,17 @@ footer{
   <!-- RIGHT COLUMN -->
   <div class="col">
     <div class="panel"><h2><span>MODELS LOADOUT</span><span class="num">06</span></h2>
-      <div class="kv"><span>Brain</span><b>hermes-agent</b></div>
-      <div class="kv"><span>STT</span><b>whisper base.en</b></div>
-      <div class="kv"><span>TTS</span><b>ElevenLabs Flash v2.5</b></div>
-      <div class="kv"><span>Fallback</span><b>claude-haiku-4-5</b></div>
+      <div class="kv"><span>Brain</span><b id="modelBrain">hermes-agent</b></div>
+      <div class="kv"><span>STT</span><b id="modelStt">auto</b></div>
+      <div class="kv"><span>TTS provider</span><b id="modelTtsProvider">auto</b></div>
+      <div class="kv"><span>TTS model</span><b id="modelTts">auto</b></div>
+      <div class="kv"><span>Language</span><b id="modelLanguage">auto</b></div>
+      <div class="kv"><span>Fallback</span><b id="modelFallback">auto</b></div>
       <div style="border-top:1px solid var(--line); margin:6px 0 4px"></div>
       <div class="kv"><span>Tokens today</span><b id="uTok">—</b></div>
       <div class="kv" id="uCostRow" style="display:none"><span>Est. cost today</span><b id="uCost">—</b></div>
       <div class="kv"><span>Turns today</span><b id="uTurns">—</b></div>
-      <div class="kv"><span>11Labs quota</span><b id="uTts">—</b></div>
+      <div class="kv"><span id="uTtsLabel">Voice usage</span><b id="uTts">—</b></div>
       <div class="bar"><i id="ttsBar"></i></div>
     </div>
     <div class="panel"><h2><span>MACHINES</span><span class="num">07</span></h2>
@@ -326,7 +383,7 @@ footer{
       <div id="skillsList"></div>
     </div>
     <div class="panel"><h2><span>DIAGNOSTICS</span><span class="num">09</span></h2>
-      <div class="kv"><span><span class="dot" id="apiDot"></span>Hermes API</span><b id="apiState">—</b></div>
+      <div class="kv"><span><span class="dot" id="apiDot"></span>Agent API</span><b id="apiState">—</b></div>
       <div class="kv"><span>CPU</span><b id="hCpu">—</b></div>
       <div class="kv"><span>Memory</span><b id="hMem">—</b></div>
       <div class="kv"><span>Refreshed</span><b id="hWhen">—</b></div>
@@ -362,10 +419,15 @@ footer{
 "use strict";
 /* ============================== state ============================== */
 const CONV = "jarvis-main";
-let ws=null, wsReady=false, capturing=false, state="standby";
+let ws=null, wsReady=false, capturing=false, state="idle";
 let audioCtx=null, workletNode=null, mediaStream=null, srcNode=null;
 let playhead=0, activeSources=[], leftoverByte=null, audioArrived=false;
 let level=0, turns=0;
+let selectedMic="", selectedSpeaker="", outputLevel=0, outputDecayTimer=null;
+let autoEndpoint=false, minSpeechMs=480, silenceMs=1200, voicedMs=0, lastVoiceAt=0, endpointTimer=null;
+let currentSpeechSegment=null, localSegmentSeq=0;
+const speechSegments=new Map();
+const reducedMotion=matchMedia("(prefers-reduced-motion: reduce)").matches;
 
 const $=id=>document.getElementById(id);
 const feed=$("feed");
@@ -379,11 +441,14 @@ function sizeCanvas(){const r=cv.parentElement.getBoundingClientRect();cv.width=
 sizeCanvas(); addEventListener("resize",sizeCanvas);
 let rot=0;
 const STATE_STYLE={
-  standby:{speed:.15,color:"#00e5ff",glow:18,pulse:0},
+  idle:{speed:.15,color:"#00e5ff",glow:18,pulse:0},
   listening:{speed:.5,color:"#19f0d8",glow:30,pulse:1},
+  transcribing:{speed:1.1,color:"#ffb300",glow:24,pulse:.25},
   thinking:{speed:1.6,color:"#ffb300",glow:26,pulse:.4},
-  tool:{speed:2.4,color:"#ffb300",glow:32,pulse:.6},
+  tool_use:{speed:2.4,color:"#ffb300",glow:32,pulse:.6},
   speaking:{speed:.7,color:"#00e5ff",glow:34,pulse:.8},
+  interrupted:{speed:.05,color:"#ffb300",glow:18,pulse:0},
+  stopped:{speed:.05,color:"#ffb300",glow:18,pulse:0},
   error:{speed:.05,color:"#ff4d5e",glow:22,pulse:0},
 };
 function drawRing(cx,cy,r,w,color,alpha,dash,offset){
@@ -393,13 +458,13 @@ function drawRing(cx,cy,r,w,color,alpha,dash,offset){
   ctx.arc(cx,cy,r,0,Math.PI*2); ctx.stroke(); ctx.globalAlpha=1; ctx.setLineDash([]);
 }
 function frame(t){
-  const s=STATE_STYLE[state]||STATE_STYLE.standby;
-  rot+=s.speed;
+  const s=STATE_STYLE[state]||STATE_STYLE.idle;
+  if(!reducedMotion)rot+=s.speed;
   const W=cv.width,H=cv.height,cx=W/2,cy=H/2;
   const base=Math.min(W,H)*0.40;
   ctx.clearRect(0,0,W,H);
   ctx.shadowColor=s.color; ctx.shadowBlur=s.glow*devicePixelRatio;
-  const pulse=1+Math.sin(t/300)*0.012*(1+s.pulse*3)+(state==="listening"?level*0.10:0);
+  const pulse=1+(reducedMotion?0:Math.sin(t/300)*0.012*(1+s.pulse*3))+(state==="listening"?level*0.10:0);
   drawRing(cx,cy,base*pulse,2*devicePixelRatio,s.color,.9);
   drawRing(cx,cy,base*.86,1.2*devicePixelRatio,s.color,.45,[40,18],rot*2);
   drawRing(cx,cy,base*.72,5*devicePixelRatio,s.color,.25,[4,10],-rot*3);
@@ -425,11 +490,26 @@ function frame(t){
 }
 requestAnimationFrame(frame);
 
+const STATE_COPY={
+  idle:["STANDBY","CLICK RING OR SPACE TO TALK"], listening:["LISTENING","CLICK AGAIN TO SEND"],
+  transcribing:["TRANSCRIBING","CONVERTING SPEECH TO TEXT"], thinking:["PROCESSING","AGENT IS THINKING"],
+  tool_use:["TOOL ACTIVE","AGENT IS WORKING"], speaking:["SPEAKING","PRESS ESCAPE TO INTERRUPT"],
+  interrupted:["INTERRUPTED","VOICE OUTPUT CANCELLED"], stopped:["STOPPED","RUN CANCELLED"],
+  error:["ERROR","CHECK VOICE LINK"],
+};
 function setState(st,label,hint){
-  state=st;
-  $("stateLabel").textContent=label;
-  if(hint!==undefined)$("stateHint").textContent=hint;
+  const normalized=st==="standby"?"idle":st==="tool"?"tool_use":st;
+  state=STATE_STYLE[normalized]?normalized:"error";
+  const copy=STATE_COPY[state];
+  $("stateLabel").textContent=label||copy[0];
+  $("stateHint").textContent=hint===undefined?copy[1]:hint;
+  $("voiceStateBadge").textContent=state.toUpperCase().replace("_"," ");
+  $("voiceStatus").textContent="Voice state "+state.replace("_"," ");
+  document.body.dataset.voiceState=state;
+  $("reactorWrap").setAttribute("aria-pressed",String(state==="listening"));
+  $("reactorWrap").setAttribute("aria-label",state==="listening"?"Stop voice input and send":"Start voice input");
 }
+setState("idle");
 
 /* ============================== feed =============================== */
 function addMsg(cls,text){
@@ -448,18 +528,44 @@ function addActivity(text,toolName,preview){
 }
 
 /* live partial transcript bubble */
-let liveEl=null, currentRun=null;
+let liveEl=null, currentRun=null, pendingReview=null;
 function showLive(text){
   if(!text)return;
   if(!liveEl){liveEl=addMsg("you live","");}
   liveEl.textContent=text; feed.scrollTop=feed.scrollHeight;
 }
 function clearLive(){ if(liveEl){liveEl.remove(); liveEl=null;} }
+function showTranscriptReview(e){
+  const confidence=Number(e.confidence??e.stt_confidence);
+  const needsReview=e.review_required===true||(Number.isFinite(confidence)&&confidence<.72);
+  if(!needsReview)return;
+  pendingReview={id:e.review_id||e.transcript_id||null,runId:e.run_id||currentRun||null};
+  $("reviewText").value=e.text||"";
+  $("reviewConfidence").textContent=Number.isFinite(confidence)?`Confidence ${Math.round(confidence*100)}%`:"Review requested";
+  $("transcriptReview").classList.add("open");
+  $("reviewText").focus();
+}
+function closeTranscriptReview(){pendingReview=null;$("transcriptReview").classList.remove("open")}
+$("reviewAccept").onclick=()=>{
+  const text=$("reviewText").value.trim(); if(!text)return;
+  if(pendingReview?.id&&wsReady){
+    ws.send(JSON.stringify({type:"transcript_review",review_id:pendingReview.id,run_id:pendingReview.runId,text}));
+    addMsg("sys","transcript correction submitted");
+  }else{
+    $("chatInput").value=text; addMsg("sys","edited transcript placed in message field for review"); $("chatInput").focus();
+  }
+  closeTranscriptReview();
+};
+$("reviewDismiss").onclick=closeTranscriptReview;
+$("reviewText").addEventListener("keydown",e=>{if((e.metaKey||e.ctrlKey)&&e.key==="Enter")$("reviewAccept").click()});
 function showStop(on){ $("stopBtn").style.display=on?"block":"none"; }
 function stopRun(){
+  if(!capturing&&!currentRun&&!["thinking","tool_use","speaking","transcribing"].includes(state))return;
   stopPlayback();
+  capturing=false; resetEndpointObservation(); $("talkBtn").textContent="ENGAGE VOICE"; $("micState").textContent=mediaStream?"ready":"idle"; setMeter("input",0);
   if(wsReady)ws.send(JSON.stringify({type:"stop_run"}));
   showStop(false);
+  setState(state==="speaking"?"interrupted":"stopped");
 }
 
 /* approval cards */
@@ -480,27 +586,49 @@ function showApproval(e){
 
 /* ============================== websocket ========================== */
 function wsUrl(){return (location.protocol==="https:"?"wss://":"ws://")+location.host+"/ws"}
+function updateModelIndicators(data={}){
+  const models=data.models||data.model_info||{};
+  const tts=data.tts_model||models.tts;
+  const provider=data.tts_provider||data.voice_provider||models.tts_provider||
+    (tts&&/eleven/i.test(tts)?"elevenlabs":tts&&/(gpt|openai)/i.test(tts)?"openai":null);
+  const stt=data.stt_model||models.stt;
+  const brain=data.llm_model||data.brain_model||models.brain||data.llm_provider;
+  const language=data.language||data.stt_language||models.language||(stt&&/\.en\b/i.test(stt)?"English":null);
+  const fallback=data.fallback_provider||data.fallback||models.fallback;
+  if(provider)$("modelTtsProvider").textContent=provider;
+  if(tts)$("modelTts").textContent=tts;
+  if(stt)$("modelStt").textContent=stt;
+  if(brain)$("modelBrain").textContent=brain;
+  if(language)$("modelLanguage").textContent=language;
+  if(fallback)$("modelFallback").textContent=fallback;
+}
 function connect(){
   ws=new WebSocket(wsUrl()); ws.binaryType="arraybuffer";
-  ws.onopen=()=>{wsReady=true;$("wsDot").className="dot on";$("wsState").textContent="online";$("connState").textContent="LINK ACTIVE";$("footMsg").textContent="VOICE SERVER CONNECTED"};
-  ws.onclose=()=>{wsReady=false;$("wsDot").className="dot off";$("wsState").textContent="offline";$("connState").textContent="LINK DOWN";setState("standby","STANDBY");setTimeout(connect,3000)};
+  ws.onopen=()=>{wsReady=true;$("wsDot").className="dot on";$("wsState").textContent="online";$("connState").textContent="LINK ACTIVE";$("footMsg").textContent="VOICE SERVER CONNECTED";if(state==="error")setState("idle")};
+  ws.onclose=()=>{wsReady=false;capturing=false;resetEndpointObservation();stopPlayback();$("wsDot").className="dot off";$("wsState").textContent="offline";$("connState").textContent="LINK DOWN";setState("error","LINK LOST","RECONNECTING");setTimeout(connect,3000)};
   ws.onerror=()=>{};
   ws.onmessage=ev=>{
     if(ev.data instanceof ArrayBuffer){playChunk(ev.data);return}
     let e; try{e=JSON.parse(ev.data)}catch{return}
     if(e.type==="summon_panel"){ summonPanel(e); }
     else if(e.type==="dismiss_panels"){ dismissAllPanels(); }
+    else if(e.type==="speech_segment"){ beginSpeechSegment(e); }
+    else if(e.type==="speech_segment_end"){ endSpeechSegment(e); }
     else if(e.type==="partial_transcript"){ showLive(e.text); }
-    else if(e.type==="transcript"){ clearLive(); if(e.text)addMsg("you",e.text); }
-    else if(e.type==="run_started"){ currentRun=e.run_id; showStop(true); }
+    else if(e.type==="transcript"){ clearLive(); if(e.text)addMsg("you",e.text); showTranscriptReview(e); updateModelIndicators(e); setState("thinking"); }
+    else if(e.type==="run_started"){ currentRun=e.run_id; showStop(true); updateModelIndicators(e); setState("thinking"); }
     else if(e.type==="approval_request"){ showApproval(e); }
+    else if(e.type==="status"){updateModelIndicators(e);if(e.message)$("footMsg").textContent=e.message.toUpperCase()}
     else if(e.type==="agent_status"){
-      if(e.state==="thinking"){setState("thinking","PROCESSING");showStop(true)}
-      else if(e.state==="tool_use"){setState("tool","WORKING");addActivity("",e.tool||"tool",e.preview)}
-      else if(e.state==="speaking")setState("speaking","SPEAKING");
-      else if(e.state==="stopped"){setState("standby","STANDBY");showStop(false);stopPlayback();addMsg("sys","run stopped")}
+      updateModelIndicators(e);
+      if(e.state==="thinking"){setState("thinking");showStop(true)}
+      else if(e.state==="tool_use"){setState("tool_use");addActivity("",e.tool||"tool",e.preview)}
+      else if(e.state==="speaking")setState("speaking");
+      else if(e.state==="interrupted"){setState("interrupted");showStop(false);stopPlayback();addMsg("sys","speech interrupted")}
+      else if(e.state==="stopped"){setState("stopped");showStop(false);stopPlayback();addMsg("sys","run stopped")}
+      else if(STATE_STYLE[e.state])setState(e.state);
     }
-    else if(e.type==="error"){ clearLive(); addMsg("sys","error: "+e.message); setState("standby","STANDBY"); showStop(false); }
+    else if(e.type==="error"){ clearLive(); addMsg("sys","error: "+e.message); setState("error"); showStop(false); }
     else if(e.type==="done"){
       currentRun=null; showStop(false);
       const tm=e.timing||{};
@@ -508,8 +636,10 @@ function connect(){
       if(tm.end_of_speech_to_first_audio_seconds!=null)$("mFirst").textContent=tm.end_of_speech_to_first_audio_seconds+"s";
       if(tm.total_turn_seconds!=null)$("mTotal").textContent=tm.total_turn_seconds+"s";
       $("mBrain").textContent=tm.llm_provider||"—";
+      updateModelIndicators(tm);
+      if(Array.isArray(tm.errors)&&tm.errors.some(x=>String(x).includes("fallback")))$("modelFallback").textContent="active";
       if(tm.response_text)addMsg("jarvis",tm.response_text);
-      setTimeout(()=>{if(state!=="listening")setState("standby","STANDBY")},400);
+      setTimeout(()=>{if(state!=="listening")setState("idle")},400);
     }
   };
 }
@@ -520,8 +650,45 @@ function ensureCtx(){
   if(!audioCtx){
     try{ audioCtx=new (window.AudioContext||window.webkitAudioContext)({sampleRate:16000}); }
     catch{ audioCtx=new (window.AudioContext||window.webkitAudioContext)(); }
+    if(selectedSpeaker&&typeof audioCtx.setSinkId==="function")audioCtx.setSinkId(selectedSpeaker).catch(()=>{});
   }
   if(audioCtx.state==="suspended")audioCtx.resume();
+}
+function setMeter(kind,value){
+  const pct=Math.max(0,Math.min(100,Math.round(value*100)));
+  const bar=$(kind==="input"?"levelBar":"outputBar");
+  const meter=$(kind==="input"?"inputMeter":"outputMeter");
+  const out=$(kind==="input"?"inputLevel":"outputLevel");
+  bar.style.width=pct+"%"; meter.setAttribute("aria-valuenow",String(pct)); out.value=pct+"%";
+}
+function pulseOutput(value){
+  outputLevel=Math.max(outputLevel*.65,value); setMeter("output",outputLevel);
+  clearTimeout(outputDecayTimer);
+  outputDecayTimer=setTimeout(()=>{outputLevel=0;setMeter("output",0)},180);
+}
+function segmentId(e){return String(e.segment_id??e.speech_id??e.id??"")}
+function beginSpeechSegment(e){
+  const wireId=segmentId(e), key=wireId||`local-${++localSegmentSeq}`;
+  const segment={key,wireId,runId:e.run_id||currentRun||null,text:e.text||e.sentence||"",sources:new Set(),ended:false,cancelled:false,hadAudio:false,acked:false};
+  speechSegments.set(key,segment); currentSpeechSegment=segment;
+}
+function maybeAcknowledgeSegment(segment){
+  if(!segment||segment.acked||segment.cancelled||!segment.ended||!segment.hadAudio||segment.sources.size)return;
+  segment.acked=true; speechSegments.delete(segment.key);
+  if(currentSpeechSegment===segment)currentSpeechSegment=null;
+  if(wsReady&&segment.wireId){
+    ws.send(JSON.stringify({type:"speech_played",segment_id:segment.wireId,run_id:segment.runId}));
+  }
+}
+function endSpeechSegment(e){
+  const id=segmentId(e);
+  const segment=(id&&speechSegments.get(id))||currentSpeechSegment;
+  if(!segment)return;
+  segment.ended=true; maybeAcknowledgeSegment(segment);
+}
+function cancelSpeechAcknowledgements(){
+  speechSegments.forEach(segment=>{segment.cancelled=true;segment.sources.clear()});
+  speechSegments.clear(); currentSpeechSegment=null;
 }
 function playChunk(buf){
   ensureCtx();
@@ -531,15 +698,26 @@ function playChunk(buf){
   if(!bytes.length)return;
   const i16=new Int16Array(bytes.buffer,bytes.byteOffset,bytes.length/2);
   const f32=new Float32Array(i16.length);
-  for(let i=0;i<i16.length;i++)f32[i]=i16[i]/32768;
+  let sumSquares=0;
+  for(let i=0;i<i16.length;i++){f32[i]=i16[i]/32768;sumSquares+=f32[i]*f32[i]}
+  pulseOutput(Math.min(1,Math.sqrt(sumSquares/Math.max(1,i16.length))*3.2));
   const ab=audioCtx.createBuffer(1,f32.length,16000); ab.copyToChannel(f32,0);
   const src=audioCtx.createBufferSource(); src.buffer=ab; src.connect(audioCtx.destination);
+  const segment=currentSpeechSegment;
+  if(segment&&!segment.cancelled){segment.sources.add(src);segment.hadAudio=true}
   const t=Math.max(audioCtx.currentTime+0.06,playhead);
   src.start(t); playhead=t+ab.duration;
-  activeSources.push(src); src.onended=()=>{activeSources=activeSources.filter(x=>x!==src)};
+  activeSources.push(src); src.onended=()=>{
+    activeSources=activeSources.filter(x=>x!==src);
+    if(segment){segment.sources.delete(src);maybeAcknowledgeSegment(segment)}
+  };
   audioArrived=true;
 }
-function stopPlayback(){ activeSources.forEach(s=>{try{s.stop()}catch{}}); activeSources=[]; playhead=0; }
+function stopPlayback(){
+  cancelSpeechAcknowledgements();
+  activeSources.forEach(s=>{try{s.stop()}catch{}}); activeSources=[]; playhead=0; leftoverByte=null;
+  clearTimeout(outputDecayTimer);outputLevel=0;setMeter("output",0);
+}
 
 /* ============================== audio in =========================== */
 const workletCode=`
@@ -575,42 +753,132 @@ async function initMic(){
     await audioCtx.audioWorklet.addModule(url); workletReady=true;
   }
   if(!mediaStream){
-    mediaStream=await navigator.mediaDevices.getUserMedia({audio:{channelCount:1,sampleRate:16000,echoCancellation:true,noiseSuppression:true,autoGainControl:true}});
+    const audio={channelCount:1,sampleRate:16000,echoCancellation:true,noiseSuppression:true,autoGainControl:true};
+    if(selectedMic)audio.deviceId={exact:selectedMic};
+    mediaStream=await navigator.mediaDevices.getUserMedia({audio});
     srcNode=audioCtx.createMediaStreamSource(mediaStream);
     workletNode=new AudioWorkletNode(audioCtx,"pcm16k");
     workletNode.port.onmessage=e=>{
       if(capturing&&wsReady)ws.send(e.data);
-      // level meter
-      const a=new Int16Array(e.data); let s=0;
-      for(let i=0;i<a.length;i+=8)s+=Math.abs(a[i]);
-      level=Math.min(1,(s/(a.length/8))/9000);
-      if(capturing)$("levelBar").style.width=(level*100).toFixed(0)+"%";
+      // RMS drives both the meter and optional local silence endpointing.
+      const a=new Int16Array(e.data); let squares=0;
+      for(let i=0;i<a.length;i++)squares+=a[i]*a[i];
+      const rms=Math.sqrt(squares/Math.max(1,a.length))/32768;
+      level=Math.min(1,rms*6);
+      if(capturing){setMeter("input",level);observeEndpoint(rms,a.length/16)};
     };
     srcNode.connect(workletNode);
+    await refreshAudioDevices();
   }
   $("micDot").className="dot on"; $("micState").textContent="ready";
 }
 
+function fillDeviceSelect(select,devices,selected,defaultLabel){
+  const previous=selected||select.value; select.replaceChildren();
+  const base=document.createElement("option");base.value="";base.textContent=defaultLabel;select.appendChild(base);
+  devices.forEach((d,i)=>{const o=document.createElement("option");o.value=d.deviceId;o.textContent=d.label||`${defaultLabel} ${i+1}`;select.appendChild(o)});
+  if([...select.options].some(o=>o.value===previous))select.value=previous;
+}
+async function refreshAudioDevices(){
+  if(!navigator.mediaDevices?.enumerateDevices)return;
+  try{
+    const devices=await navigator.mediaDevices.enumerateDevices();
+    fillDeviceSelect($("micSelect"),devices.filter(d=>d.kind==="audioinput"),selectedMic,"System default");
+    fillDeviceSelect($("speakerSelect"),devices.filter(d=>d.kind==="audiooutput"),selectedSpeaker,"System default");
+    if(!window.AudioContext?.prototype?.setSinkId&&!window.webkitAudioContext?.prototype?.setSinkId){
+      $("speakerSelect").disabled=true;$("speakerSelect").title="Speaker selection is not supported by this browser";
+    }
+  }catch{}
+}
+$("micSelect").addEventListener("change",async e=>{
+  selectedMic=e.target.value;
+  try{localStorage.setItem("jarvis.mic",selectedMic)}catch{}
+  if(mediaStream){mediaStream.getTracks().forEach(t=>t.stop());mediaStream=null;if(srcNode)srcNode.disconnect();srcNode=null;}
+  try{await initMic()}catch(err){addMsg("sys","microphone change failed: "+err.message)}
+});
+$("speakerSelect").addEventListener("change",async e=>{
+  selectedSpeaker=e.target.value;
+  try{localStorage.setItem("jarvis.speaker",selectedSpeaker)}catch{}
+  ensureCtx();
+  if(typeof audioCtx.setSinkId==="function")try{await audioCtx.setSinkId(selectedSpeaker)}catch(err){addMsg("sys","speaker change failed: "+err.message)}
+});
+try{selectedMic=localStorage.getItem("jarvis.mic")||"";selectedSpeaker=localStorage.getItem("jarvis.speaker")||""}catch{}
+if(navigator.mediaDevices){navigator.mediaDevices.addEventListener?.("devicechange",refreshAudioDevices);refreshAudioDevices()}
+
 /* ============================== talk flow ========================== */
+const RMS_SPEECH_THRESHOLD=.018;
+function clampSetting(value,min,max,fallback){
+  if(value===null||value==="")return fallback;
+  const n=Number(value);return Number.isFinite(n)?Math.min(max,Math.max(min,Math.round(n))):fallback;
+}
+function updateEndpointUI(){
+  $("autoEndpoint").checked=autoEndpoint;
+  $("minSpeechMs").value=String(minSpeechMs); $("silenceMs").value=String(silenceMs);
+  $("minSpeechMs").disabled=!autoEndpoint; $("silenceMs").disabled=!autoEndpoint;
+  $("endpointStatus").textContent=autoEndpoint
+    ?`Manual stop active · auto-send after ${silenceMs} ms silence`
+    :"Manual stop active · auto-send off";
+}
+function saveEndpointSettings(){
+  try{
+    localStorage.setItem("jarvis.autoEndpoint",String(autoEndpoint));
+    localStorage.setItem("jarvis.minSpeechMs",String(minSpeechMs));
+    localStorage.setItem("jarvis.silenceMs",String(silenceMs));
+  }catch{}
+}
+function resetEndpointObservation(){voicedMs=0;lastVoiceAt=0;clearTimeout(endpointTimer);endpointTimer=null}
+function observeEndpoint(rms,chunkMs){
+  if(!capturing||!autoEndpoint)return;
+  if(rms>=RMS_SPEECH_THRESHOLD){
+    voicedMs+=chunkMs;lastVoiceAt=performance.now();clearTimeout(endpointTimer);endpointTimer=null;
+    return;
+  }
+  if(voicedMs<minSpeechMs||!lastVoiceAt||endpointTimer)return;
+  const remaining=Math.max(0,silenceMs-(performance.now()-lastVoiceAt));
+  endpointTimer=setTimeout(()=>{
+    endpointTimer=null;
+    if(capturing&&autoEndpoint&&voicedMs>=minSpeechMs&&performance.now()-lastVoiceAt>=silenceMs)finishCapture("automatic");
+  },remaining);
+}
+function finishCapture(reason="manual"){
+  if(!capturing)return;
+  capturing=false;clearTimeout(endpointTimer);endpointTimer=null;
+  if(wsReady)ws.send(JSON.stringify({type:"stop",endpoint:reason}));
+  $("talkBtn").textContent="ENGAGE VOICE"; $("micState").textContent="ready"; setMeter("input",0);
+  setState("transcribing",undefined,reason==="automatic"?"SILENCE DETECTED · PROCESSING":"CONVERTING SPEECH TO TEXT");
+}
+try{
+  autoEndpoint=localStorage.getItem("jarvis.autoEndpoint")==="true";
+  minSpeechMs=clampSetting(localStorage.getItem("jarvis.minSpeechMs"),160,5000,480);
+  silenceMs=clampSetting(localStorage.getItem("jarvis.silenceMs"),400,5000,1200);
+}catch{}
+updateEndpointUI();
+$("autoEndpoint").addEventListener("change",e=>{autoEndpoint=e.target.checked;resetEndpointObservation();saveEndpointSettings();updateEndpointUI()});
+function applyEndpointNumbers(){
+  minSpeechMs=clampSetting($("minSpeechMs").value,160,5000,480);
+  silenceMs=clampSetting($("silenceMs").value,400,5000,1200);
+  resetEndpointObservation();saveEndpointSettings();updateEndpointUI();
+}
+$("minSpeechMs").addEventListener("change",applyEndpointNumbers);
+$("silenceMs").addEventListener("change",applyEndpointNumbers);
+
 async function toggleTalk(){
   if(!wsReady){addMsg("sys","voice server offline");return}
   if(capturing){ // stop talking
-    capturing=false;
-    ws.send(JSON.stringify({type:"stop"}));
-    $("talkBtn").textContent="ENGAGE VOICE"; $("micState").textContent="ready"; $("levelBar").style.width="0%";
-    setState("thinking","PROCESSING");
+    finishCapture("manual");
     return;
   }
-  try{await initMic()}catch(err){addMsg("sys","mic blocked: "+err.message);return}
+  try{await initMic()}catch(err){addMsg("sys","mic blocked: "+err.message);setState("error","MIC BLOCKED",err.message);return}
   stopPlayback();                       // barge-in
   audioArrived=false;
   ws.send(JSON.stringify({type:"start",sample_rate:16000,format:"pcm_s16le",channels:1,conversation:CONV}));
-  capturing=true;
+  resetEndpointObservation();capturing=true;
   $("talkBtn").textContent="■ STOP & SEND"; $("micState").textContent="LIVE";
   setState("listening","LISTENING","CLICK AGAIN TO SEND");
 }
 $("talkBtn").onclick=toggleTalk;
 $("reactorWrap").onclick=toggleTalk;
+$("reactorWrap").addEventListener("keydown",e=>{if(e.key==="Enter"){e.preventDefault();toggleTalk()}});
 $("stopBtn").onclick=stopRun;
 
 /* ---- pop-up viewer ---- */
@@ -634,7 +902,8 @@ addEventListener("keydown",e=>{
   else stopRun();
 });
 addEventListener("keydown",e=>{
-  if(e.code==="Space"&&document.activeElement!==$("chatInput")){e.preventDefault();toggleTalk()}
+  const tag=document.activeElement?.tagName;
+  if(e.code==="Space"&&!(["INPUT","TEXTAREA","SELECT","BUTTON"].includes(tag))){e.preventDefault();toggleTalk()}
 });
 
 /* ============================== typed chat ========================= */
@@ -651,8 +920,8 @@ async function sendChat(){
     if(/^\/(new|reset|clear)\b/i.test(text)){     // slash reset → also clear the visible feed
       setTimeout(()=>{feed.innerHTML="";addMsg("sys","conversation reset");},800);
     }
-  }catch(err){ addMsg("sys","chat error: "+err.message); }
-  if(state!=="listening")setState("standby","STANDBY");
+  }catch(err){ addMsg("sys","chat error: "+err.message); setState("error"); return; }
+  if(state!=="listening")setState("idle");
 }
 $("sendBtn").onclick=sendChat;
 $("clearBtn").onclick=()=>{feed.innerHTML="";addMsg("sys","chat cleared (history stays in Hermes — type /new to reset the conversation)");};
@@ -662,8 +931,12 @@ $("chatInput").addEventListener("keydown",e=>{if(e.key==="Enter")sendChat()});
 async function jget(path){const r=await fetch("/api/hermes"+path);if(!r.ok)throw new Error(r.status);return r.json()}
 async function refreshHealth(){
   try{
-    const h=await jget("/health/detailed");
+    const br=await fetch("/api/brain/capabilities");
+    const brain=await br.json(); if(!br.ok)throw new Error(brain.error||br.status);
     $("apiDot").className="dot on"; $("apiState").textContent="online";
+    if(brain.provider){$("modelBrain").textContent=brain.provider;$("mBrain").textContent=brain.provider}
+    if(brain.provider!=="hermes"){$("hSessions").textContent=brain.capabilities?.sessions?"ready":"—";$("hAgents").textContent="local";$("hWhen").textContent=new Date().toTimeString().slice(0,8);return}
+    const h=await jget("/health/detailed");
     const st=h.sessions||h.session_stats||{}; const rs=h.resources||{};
     $("hSessions").textContent=st.active??st.total??"ok";
     $("hAgents").textContent=h.running_agents??h.agents??"0";
@@ -706,18 +979,24 @@ const fmtK=n=>n>=1e6?(n/1e6).toFixed(1)+"M":n>=1e3?(n/1e3).toFixed(1)+"k":String
 async function refreshUsage(){
   try{
     const r=await fetch("/api/usage"); const j=await r.json();
+    updateModelIndicators(j);
     const t=j.llm?.today||{};
     $("uTok").textContent=`${fmtK(t.llm_in||0)} in / ${fmtK(t.llm_out||0)} out`;
     $("uTurns").textContent=t.turns||0;
     if(j.llm?.today_cost!=null){$("uCostRow").style.display="flex";$("uCost").textContent="$"+j.llm.today_cost.toFixed(2)}
-    const e=j.elevenlabs;
-    if(e&&e.limit){
-      const pct=Math.round(e.used/e.limit*100);
-      $("uTts").textContent=`${fmtK(e.used)} / ${fmtK(e.limit)} (${100-pct}% left)`;
+    const voice=j.voice_usage||j.tts||j.elevenlabs;
+    const provider=voice?.provider||j.voice_provider||(j.elevenlabs?"elevenlabs":"voice");
+    if(provider!=="voice")$("modelTtsProvider").textContent=provider;
+    $("uTtsLabel").textContent=`${provider} usage`;
+    if(voice&&(voice.limit||voice.characters_limit)){
+      const used=voice.used??voice.characters_used??0, limit=voice.limit??voice.characters_limit;
+      const pct=Math.round(used/limit*100);
+      const unit=voice.unit||"units";
+      $("uTts").textContent=`${fmtK(used)} / ${fmtK(limit)} ${unit} (${Math.max(0,100-pct)}% left)`;
       $("ttsBar").style.width=pct+"%";
       $("uTts").className=pct>90?"err":pct>70?"warn":"";
     }else{
-      // quota API unavailable (key needs user_read permission) → local tally
+      // Provider quota unavailable: the local provider-neutral tally remains useful.
       $("uTts").textContent=fmtK(t.tts_chars||0)+" chars today";
       $("ttsBar").style.width="0%";
     }

@@ -28,24 +28,30 @@ Recommended: add voice-behavior rules to your global `~/.hermes/SOUL.md`
 actions and wait for approval). The agent — not the voice server — should own
 its personality.
 
-## 2. ElevenLabs (the voice)
+## 2. Voice provider
 
-Create an API key at elevenlabs.io and pick a voice from their library, noting
-its `voice_id`. Add to `~/.hermes/.env`:
+The example config uses OpenAI TTS. Add its key to `~/.hermes/.env`:
 
 ```bash
-ELEVENLABS_API_KEY=...
+OPENAI_API_KEY=...
 ```
 
-For the HUD's quota bar, give the key the **User → Read** permission.
+To use ElevenLabs instead, set `voice.provider: elevenlabs`, select its model
+and voice id, and add `ELEVENLABS_API_KEY`. For its remote quota bar, give the
+key the **User → Read** permission. Local character usage works without it.
+
+`voice.preset` selects a founder-local voice profile from `voice.presets`.
+Presets may change only the model, voice, instructions and speed. Put names and
+acronyms under `voice.pronunciations`. An optional `voice.fallback` provider is
+used only when the primary fails before sending any audio; it never splices a
+second voice into an utterance already playing.
 
 ## 3. The voice pipeline server (this repo)
 
 ```bash
 cd server
 python3 -m venv .venv
-.venv/bin/pip install fastapi uvicorn requests pyyaml numpy anthropic \
-    RealtimeSTT faster-whisper silero-vad websockets psutil
+.venv/bin/pip install -r requirements.txt
 cp config/server.example.yaml config/server.yaml
 ```
 
@@ -54,9 +60,10 @@ releases treat them as optional extras and fail at runtime without them
 (silently for VAD, loudly for the engine). The first start takes 60–90 s
 (torch import + model download); subsequent starts are faster.
 
-Edit `config/server.yaml`: set `voice.voice_id`, and adjust the `machines:`
-list (or delete it). The first run downloads the Whisper model (~460 MB for
-`small.en`).
+Edit `config/server.yaml`: select `brain.provider`, select the voice provider,
+and adjust `machines:` (or delete it). The first run downloads the Whisper
+model (~460 MB for `small.en`). Gbrain is optional and is enabled by setting
+`brain.provider: gbrain`; its routes and SSE names are configurable locally.
 
 ### TLS certificates (required for browser microphone)
 
@@ -84,7 +91,7 @@ echo "JARVIS_HUD_TOKEN=jarvis-$(python3 -c 'import secrets;print(secrets.token_h
 The HUD asks for this once per device. Omit the variable entirely to disable
 auth (not recommended).
 
-### Boot greeting (one-time, ~110 ElevenLabs characters)
+### Boot greeting (optional; the helper currently uses ElevenLabs)
 
 ```bash
 scripts/make-boot-audio.sh YourFirstName
@@ -98,6 +105,11 @@ scripts/make-boot-audio.sh YourFirstName
 
 Wait ~40 s for the STT model to warm, then open `https://YOUR_HOST/hud/`.
 Run `scripts/jarvis-health.sh` to check all five services.
+
+In the Voice Link panel, **Auto-send after silence** is opt-in and preserves
+manual click/Space control. Remote GPU STT can return confidence; low-confidence
+turns pause for review before they reach the brain. Approval prompts are spoken
+without reading sensitive command details and time out to deny.
 
 ## 4. Auto-start on boot (macOS)
 
@@ -122,6 +134,11 @@ cd client
 python -m venv .venv && .venv/Scripts/pip install sounddevice websockets numpy openwakeword
 python client.py --push-to-talk --server ws://YOUR_HOST:8765/ws --list-devices
 ```
+
+Without `--push-to-talk`, wake-word mode stops an utterance after local silence
+detection instead of always recording for the maximum duration. Tune
+`--speech-rms-threshold`, `--silence-seconds`, and `--min-record-seconds` for
+the founder's microphone and room.
 
 **GPU worker stats** (shows in the Machines panel): copy
 `worker/worker_stats.py` to the worker machine, `pip install psutil`, run it,

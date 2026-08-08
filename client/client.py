@@ -14,15 +14,18 @@ import json
 import math
 import queue
 import signal
-import struct
 import sys
 import threading
 import time
 from dataclasses import dataclass
 
 import numpy as np
-import sounddevice as sd
 import websockets
+
+try:
+    import sounddevice as sd
+except Exception:  # Optional at import time so endpointing logic stays testable.
+    sd = None
 
 try:
     from openwakeword.model import Model as WakeWordModel
@@ -44,7 +47,44 @@ class DeviceChoice:
     output_device: int | None
 
 
+@dataclass
+class SpeechEndpointDetector:
+    """Small local endpoint detector for founder-only wake-word operation.
+
+    It deliberately uses an RMS threshold instead of another model dependency:
+    openWakeWord already arms capture, and this detector only decides when the
+    following utterance has ended. The maximum recording duration remains the
+    hard safety bound.
+    """
+
+    rms_threshold: float = 450.0
+    silence_seconds: float = 0.9
+    min_record_seconds: float = 0.5
+    speech_started: bool = False
+    silent_seconds: float = 0.0
+
+    def observe(self, pcm: bytes, elapsed_seconds: float) -> bool:
+        usable = len(pcm) - (len(pcm) % 2)
+        if usable <= 0:
+            return False
+        samples = np.frombuffer(pcm[:usable], dtype=np.int16).astype(np.float32)
+        rms = float(np.sqrt(np.mean(samples * samples))) if samples.size else 0.0
+        chunk_seconds = samples.size / SAMPLE_RATE
+        if rms >= self.rms_threshold:
+            self.speech_started = True
+            self.silent_seconds = 0.0
+        elif self.speech_started:
+            self.silent_seconds += chunk_seconds
+        return (
+            self.speech_started
+            and elapsed_seconds >= self.min_record_seconds
+            and self.silent_seconds >= self.silence_seconds
+        )
+
+
 def list_devices() -> None:
+    if sd is None:
+        raise RuntimeError("sounddevice is not installed")
     print(sd.query_devices())
 
 
@@ -236,6 +276,9 @@ async def wake_word_loop(
     wake_word: str,
     threshold: float,
     max_record_seconds: float,
+    speech_rms_threshold: float,
+    silence_seconds: float,
+    min_record_seconds: float,
 ) -> None:
     if WakeWordModel is None:
         print("openWakeWord could not be imported. Run with --push-to-talk or reinstall requirements-client.txt.")
@@ -263,12 +306,20 @@ async def wake_word_loop(
         play_beep(output_device)
         await ws.send(json.dumps({"type": "start", "sample_rate": SAMPLE_RATE, "format": "pcm_s16le", "channels": CHANNELS}))
         start = time.perf_counter()
+        endpoint = SpeechEndpointDetector(
+            rms_threshold=speech_rms_threshold,
+            silence_seconds=silence_seconds,
+            min_record_seconds=min_record_seconds,
+        )
         while time.perf_counter() - start < max_record_seconds and not stop_event.is_set():
             try:
                 speech_chunk = await asyncio.to_thread(audio_q.get, True, 0.2)
             except queue.Empty:
                 continue
             await ws.send(speech_chunk)
+            if endpoint.observe(speech_chunk, time.perf_counter() - start):
+                print(f"Speech endpoint detected after {time.perf_counter() - start:.1f}s.")
+                break
         await ws.send(json.dumps({"type": "stop"}))
         print("Utterance sent. Waiting for response audio...")
 
@@ -283,11 +334,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--wake-word", default=DEFAULT_WAKE_WORD, help=f"openWakeWord stock model name, default {DEFAULT_WAKE_WORD}")
     parser.add_argument("--wake-threshold", type=float, default=0.55, help="wake detection threshold")
     parser.add_argument("--max-record-seconds", type=float, default=8.0, help="maximum utterance length after wake word")
+    parser.add_argument("--speech-rms-threshold", type=float, default=450.0, help="RMS level treated as speech after wake word")
+    parser.add_argument("--silence-seconds", type=float, default=0.9, help="silence needed to end a wake-word utterance")
+    parser.add_argument("--min-record-seconds", type=float, default=0.5, help="minimum recording duration after wake word")
     return parser.parse_args()
 
 
 async def main_async() -> int:
     args = parse_args()
+    if sd is None:
+        print("sounddevice is required. Install the local client dependencies first.")
+        return 2
     if args.list_devices:
         list_devices()
         return 0
@@ -344,6 +401,9 @@ async def main_async() -> int:
                         args.wake_word,
                         args.wake_threshold,
                         args.max_record_seconds,
+                        args.speech_rms_threshold,
+                        args.silence_seconds,
+                        args.min_record_seconds,
                     )
                     await player
     except OSError as exc:

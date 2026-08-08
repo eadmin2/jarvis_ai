@@ -39,6 +39,22 @@ previous instance fully released the port before restarting.
 **ElevenLabs quota shows "chars today" instead of a quota bar** — give your
 API key the User → Read permission in the ElevenLabs dashboard.
 
+**OpenAI voice sounds too fast or distorted** — confirm you are running the
+current provider adapter. OpenAI returns 24 kHz PCM; JARVIS must stream-resample
+it to the HUD's 16 kHz contract. A direct 24 kHz feed plays roughly 1.5x fast.
+
+**Wake-word capture waits the full maximum duration** — lower
+`--speech-rms-threshold` if speech never arms endpointing, or lower
+`--silence-seconds` if the room becomes quiet but capture continues.
+
+**TTS fallback never activates after speech starts** — intentional. Switching
+providers after bytes have played would splice voices. JARVIS only falls back
+before the first audio byte; mid-stream failures are surfaced and logged.
+
+**A transcript pauses before the agent responds** — remote STT confidence fell
+below `stt.review_below_confidence`. Edit and accept it in the HUD, or let
+`stt.review_timeout_seconds` expire to use the original text.
+
 **Stop button says stopped but Hermes kept working briefly** — on Hermes
 v0.16, session runs aren't registered in the runs store (`/stop` 404s); the
 halt works by dropping the SSE stream. Newer Hermes builds may fix this.

@@ -1,7 +1,10 @@
 # Copy to server.yaml and edit. Secrets live in ~/.hermes/.env (NOT here).
 
+brain:
+  provider: hermes            # hermes or gbrain; brain.provider takes precedence
+
 llm:
-  provider: hermes            # primary brain: Hermes Agent API. "anthropic" = basic fallback mode.
+  provider: hermes            # legacy/default selector; anthropic is the basic fallback mode
   model: claude-haiku-4-5     # used only by the fallback provider
   api_key_env: ANTHROPIC_API_KEY
   max_tokens: 220
@@ -24,13 +27,34 @@ hermes:
     more detail. Speak numbers, dates, times and phone numbers as natural
     spoken words. Never speak secrets, API keys, or passwords aloud.
 
+# Optional founder-local Gbrain backend. Set brain.provider: gbrain to enable.
+# Routes and upstream SSE event names are configurable so JARVIS does not bind
+# itself to one Gbrain build. Defaults mirror the Hermes-shaped local contract.
+gbrain:
+  base_url: http://127.0.0.1:8767
+  api_key_env: GBRAIN_API_KEY
+  api_key_required: false
+  conversation: jarvis-main
+  timeout: 240
+  fallback_provider: anthropic
+  endpoints:
+    capabilities: /api/capabilities
+    create_session: /api/sessions
+    get_session: /api/sessions/{session_id}
+    stream: /api/sessions/{session_id}/chat/stream
+    stop: /v1/runs/{run_id}/stop
+    approval: /v1/runs/{run_id}/approval
+
 stt:
   model: small.en           # LOCAL model (fallback if remote configured; primary otherwise)
+  language: en             # use a multilingual model plus auto/null for language detection
   device: cpu
   compute_type: int8
   sample_rate: 16000
   partials: true            # live transcript while speaking
   partial_interval: 1.2     # seconds of new audio between partial passes
+  review_below_confidence: 0.72  # remote worker only; pauses for founder review
+  review_timeout_seconds: 20
   # Optional GPU worker (worker/stt_server.py on any NVIDIA machine):
   # big-model accuracy at ~0.2s. Falls back to the local model automatically.
   # remote:
@@ -63,13 +87,44 @@ server:
 security:
   hud_token_env: JARVIS_HUD_TOKEN   # set in ~/.hermes/.env; unset = auth disabled
   extra_origin_hosts: []            # e.g. ["192.168.1.10"] if you open the HUD by raw IP
+  approval_timeout_seconds: 60      # unattended requests are denied locally
 
 voice:
-  provider: elevenlabs
-  model: eleven_flash_v2_5
-  voice_name: "Your chosen voice"
-  voice_id: YOUR_ELEVENLABS_VOICE_ID
-  output_format: pcm_16000
+  provider: openai          # openai or elevenlabs
+  api_key_env: OPENAI_API_KEY
+  model: gpt-4o-mini-tts
+  voice_name: "Founder voice"
+  voice_id: alloy
+  sample_rate: 16000        # HUD and clients always receive PCM16 mono at this rate
+  timeout: 120
+  instructions: "Speak calmly, precisely, and naturally."
+  speak_approvals: true
+  preset: founder
+  presets:
+    founder:
+      voice: alloy
+      instructions: "Speak calmly, precisely, and naturally. Keep routine answers concise."
+      speed: 1.0
+    briefing:
+      voice: alloy
+      instructions: "Use a measured executive briefing cadence."
+      speed: 0.95
+  pronunciations:
+    FAOS: "F A O S"
+    Gbrain: "G brain"
+  # Optional conservative failover; it is used only before any audio is sent:
+  # fallback:
+  #   provider: elevenlabs
+  #   api_key_env: ELEVENLABS_API_KEY
+  #   model: eleven_flash_v2_5
+  #   voice_id: YOUR_ELEVENLABS_VOICE_ID
+  #   output_format: pcm_16000
+  # ElevenLabs alternative:
+  # provider: elevenlabs
+  # api_key_env: ELEVENLABS_API_KEY
+  # model: eleven_flash_v2_5
+  # voice_id: YOUR_ELEVENLABS_VOICE_ID
+  # output_format: pcm_16000
 
 persona:                     # used only by the anthropic fallback path
   system_prompt: >

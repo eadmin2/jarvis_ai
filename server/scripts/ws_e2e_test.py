@@ -1,23 +1,28 @@
 #!/usr/bin/env python3
 """End-to-end voice pipeline test: stream a WAV through the WS, print events."""
-import asyncio, json, sys, wave
+import asyncio
+import json
+import sys
+import wave
 
 import websockets
 
-WAV = sys.argv[1]
-CONV = sys.argv[2] if len(sys.argv) > 2 else "jarvis-debug"
 URL = "ws://127.0.0.1:8765/ws"
 
 
 async def main():
-    with wave.open(WAV, "rb") as w:
+    if len(sys.argv) < 2:
+        raise SystemExit("usage: ws_e2e_test.py INPUT.wav [conversation] [--realtime]")
+    wav_path = sys.argv[1]
+    conversation = sys.argv[2] if len(sys.argv) > 2 and not sys.argv[2].startswith("--") else "jarvis-debug"
+    with wave.open(wav_path, "rb") as w:
         assert w.getframerate() == 16000 and w.getnchannels() == 1, "need 16k mono"
         pcm = w.readframes(w.getnframes())
     audio_bytes = 0
     async with websockets.connect(URL, max_size=None) as ws:
         await ws.send(json.dumps({"type": "start", "sample_rate": 16000,
                                   "format": "pcm_s16le", "channels": 1,
-                                  "conversation": CONV}))
+                                  "conversation": conversation}))
         step = 2560  # 80 ms
         realtime = "--realtime" in sys.argv  # pace audio like a live mic (tests partials)
         for i in range(0, len(pcm), step):
@@ -51,9 +56,11 @@ async def main():
             elif t == "agent_status":
                 print("AGENT:", ev.get("state"), ev.get("tool", ""), (ev.get("preview") or "")[:60])
                 if ev.get("state") == "stopped":
-                    print("STOPPED_OK"); break
+                    print("STOPPED_OK")
+                    break
             elif t == "error":
-                print("ERROR:", ev.get("message")); break
+                print("ERROR:", ev.get("message"))
+                break
             elif t == "done":
                 tm = ev.get("timing", {})
                 print("RESPONSE:", (tm.get("response_text") or "")[:400])
@@ -64,4 +71,5 @@ async def main():
                       "total:", tm.get("total_turn_seconds"))
                 break
 
-asyncio.run(main())
+if __name__ == "__main__":
+    asyncio.run(main())

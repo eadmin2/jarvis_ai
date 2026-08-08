@@ -1,0 +1,12 @@
+fastapi>=0.115,<1
+uvicorn>=0.34,<1
+requests>=2.32,<3
+PyYAML>=6.0,<7
+numpy>=2.0,<3
+scipy>=1.14,<2
+anthropic>=0.49,<1
+RealtimeSTT>=0.3.104,<1
+faster-whisper>=1.1,<2
+silero-vad>=5.1,<7
+websockets>=14,<16
+psutil>=6.1,<8

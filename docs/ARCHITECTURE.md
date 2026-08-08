@@ -18,8 +18,18 @@
    (incl. `interrupted` flag), `run.completed` (token usage), `*approval*`
    (→ HUD approval cards).
 5. Text is sentence-split, markdown/think-block-stripped, **secret-redacted**,
-   then each sentence streams through ElevenLabs back to the client as raw PCM
-   while generation continues.
+   then each sentence streams through the configured OpenAI or ElevenLabs TTS
+   adapter as 16 kHz PCM while generation continues. OpenAI's 24 kHz PCM is
+   converted by a stateful resampler whose phase persists across HTTP chunks.
+6. TTS audio is framed by `speech_segment`/`speech_segment_end`. The HUD sends
+   `speech_played` only after every source in that segment ends naturally, so
+   interruption memory reflects what reached the founder's speakers.
+7. One cancellation token owns the brain SSE response and TTS HTTP response.
+   Barge-in closes both resources before the next local turn is started.
+
+Hermes and Gbrain implement one normalized brain contract: run start, text,
+tool use, approval, memory update, completion, interruption and error. Gbrain's
+local endpoints and upstream SSE event names are configurable in `server.yaml`.
 
 Why the Sessions API and not `/v1/responses` or `/v1/runs`: on Hermes v0.16,
 sessions are the only surface that combines named persistent memory, run ids,
@@ -35,18 +45,21 @@ Client → server (JSON + binary):
 {"type":"stop"}
 {"type":"stop_run"}
 {"type":"approval_decision","run_id":...,"approval_id":...,"decision":"allow"|"deny"}
+{"type":"speech_played","segment_id":"turn:segment"}
+{"type":"transcript_review","review_id":"turn:review","text":"corrected text"}
 ```
 
 `start` during an active turn = barge-in: the server cancels the turn, stops
-the Hermes run, records the last spoken sentence, and prefixes the next turn's
-input with an interruption note so the agent's memory matches what you heard.
+the selected brain run, records the last HUD-acknowledged sentence, and prefixes
+the next turn with an interruption note so memory matches what was actually heard.
 
 Server → client:
 
 ```
 status · partial_transcript · transcript · run_started{run_id}
-agent_status{state: thinking|tool_use(+tool,preview)|speaking|stopped}
+agent_status{state: transcribing|thinking|tool_use(+tool,preview)|speaking|interrupted|stopped|error}
 approval_request{data,run_id} · error · done{timing}
+speech_segment{segment_id,text} · speech_segment_end{segment_id}
 <binary TTS PCM — frames split at arbitrary byte boundaries; buffer odd bytes>
 ```
 
@@ -58,7 +71,7 @@ approval_request{data,run_id} · error · done{timing}
 | `/api/hermes/{path}` | **allowlist** proxy to Hermes API, injects the bearer key (GET: health, capabilities, skills, toolsets, jobs, sessions; POST: v1/responses only) |
 | `/api/chat` | typed chat turn on the shared voice session |
 | `/api/machines` | host psutil stats + remote workers from config |
-| `/api/usage` | local token/char tally + ElevenLabs quota (needs user_read on the key) |
+| `/api/usage` | provider-neutral local token/character tally plus optional ElevenLabs quota |
 | `/api/summon` | broadcasts a holographic media panel (`{media, src, title, position}` or `{action:"dismiss"}`) to every connected HUD over its WebSocket — this is what the bundled `hud_display` Hermes plugin calls |
 | port 9443 (separate app) | TLS reverse proxy of the Hermes dashboard with WebSocket bridge and frame-header stripping, so the HTTPS HUD can iframe it |
 
@@ -86,7 +99,7 @@ behind Hermes; the second is the Whisper model size.
    `getcwd`, EX_CONFIG from external log paths, venv-python invocation).
 4. **Browser mic**: requires a secure context — hence the self-signed TLS and
    the per-device cert trust.
-5. **ElevenLabs frames** arrive at arbitrary byte boundaries; decode only
+5. **TTS PCM frames** arrive at arbitrary byte boundaries; decode only
    complete int16 pairs and carry the leftover byte.
 6. **Near-silent audio** makes faster-whisper raise ("No clip timestamps
    found") — both STT paths treat any transcription exception as an empty
