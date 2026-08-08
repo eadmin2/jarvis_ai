@@ -330,7 +330,7 @@ body[data-voice-state="stopped"] #coreState .st{color:var(--amber)}
       <button class="btn viewBtn" onclick="openView('CHAT','/chat')">▸ DASHBOARD CHAT</button>
     </div>
     <div class="panel"><h2><span>SESSION</span><span class="num">05</span></h2>
-      <div class="kv"><span>Conversation</span><b>jarvis-main</b></div>
+      <div class="kv"><span>Conversation</span><b id="sessionConversation">configured</b></div>
       <div class="kv"><span>Memory scope</span><b>jarvis:user:main</b></div>
       <div class="kv"><span>Active sessions</span><b id="hSessions">—</b></div>
       <div class="kv"><span>Running agents</span><b id="hAgents">—</b></div>
@@ -418,7 +418,6 @@ body[data-voice-state="stopped"] #coreState .st{color:var(--amber)}
 <script>
 "use strict";
 /* ============================== state ============================== */
-const CONV = "jarvis-main";
 let ws=null, wsReady=false, capturing=false, state="idle";
 let audioCtx=null, workletNode=null, mediaStream=null, srcNode=null;
 let playhead=0, activeSources=[], leftoverByte=null, audioArrived=false;
@@ -618,7 +617,11 @@ function connect(){
     else if(e.type==="transcript"){ clearLive(); if(e.text)addMsg("you",e.text); showTranscriptReview(e); updateModelIndicators(e); setState("thinking"); }
     else if(e.type==="run_started"){ currentRun=e.run_id; showStop(true); updateModelIndicators(e); setState("thinking"); }
     else if(e.type==="approval_request"){ showApproval(e); }
-    else if(e.type==="status"){updateModelIndicators(e);if(e.message)$("footMsg").textContent=e.message.toUpperCase()}
+    else if(e.type==="status"){
+      updateModelIndicators(e);
+      if(e.conversation)$("sessionConversation").textContent=e.conversation;
+      if(e.message)$("footMsg").textContent=e.message.toUpperCase();
+    }
     else if(e.type==="agent_status"){
       updateModelIndicators(e);
       if(e.state==="thinking"){setState("thinking");showStop(true)}
@@ -871,7 +874,7 @@ async function toggleTalk(){
   try{await initMic()}catch(err){addMsg("sys","mic blocked: "+err.message);setState("error","MIC BLOCKED",err.message);return}
   stopPlayback();                       // barge-in
   audioArrived=false;
-  ws.send(JSON.stringify({type:"start",sample_rate:16000,format:"pcm_s16le",channels:1,conversation:CONV}));
+  ws.send(JSON.stringify({type:"start",sample_rate:16000,format:"pcm_s16le",channels:1}));
   resetEndpointObservation();capturing=true;
   $("talkBtn").textContent="■ STOP & SEND"; $("micState").textContent="LIVE";
   setState("listening","LISTENING","CLICK AGAIN TO SEND");
@@ -912,7 +915,7 @@ async function sendChat(){
   inp.value=""; addMsg("you",text); setState("thinking","PROCESSING");
   try{
     const r=await fetch("/api/chat",{method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({input:text,conversation:CONV})});
+      body:JSON.stringify({input:text})});
     const j=await r.json();
     if(!r.ok)throw new Error(j.error||r.status);
     (j.tools||[]).forEach(t=>addActivity("",t.name,t.preview));

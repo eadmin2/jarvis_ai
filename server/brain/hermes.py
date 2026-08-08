@@ -38,6 +38,47 @@ class HermesAdapter(HTTPBrainAdapter, BaseBrainAdapter):
         }
         super().__init__(merged, transport)
         self.state_path = state_path or Path(__file__).resolve().parents[1] / "logs" / "hermes_sessions.json"
+        self._model_locks: set[tuple[str, str, str]] = set()
+
+    def _lock_session_model(self, session_id: str) -> None:
+        """Pin an existing named session to the configured Codex runtime.
+
+        Hermes persists a session's prior model selection. Without an explicit
+        lock, changing the gateway default does not repair an older session.
+        """
+
+        model = str(self.config.get("model") or "").strip()
+        provider = str(self.config.get("model_provider") or "").strip()
+        if not model:
+            return
+        lock = (session_id, provider, model)
+        if lock in self._model_locks:
+            return
+        body = {"model": model}
+        if provider:
+            body["provider"] = provider
+        response = self.transport.post(
+            self._url("/api/sessions/{session_id}/model", session_id=session_id),
+            headers=self.headers(),
+            json=body,
+            timeout=15,
+        )
+        try:
+            response.raise_for_status()
+            payload = self._response_payload(response)
+            runtime = payload.get("runtime", payload)
+            locked_model = str(runtime.get("model") or "") if isinstance(runtime, Mapping) else ""
+            if locked_model and locked_model != model:
+                raise BrainAdapterError(
+                    f"Hermes locked unexpected model {locked_model!r}; expected {model!r}"
+                )
+        except BrainAdapterError:
+            raise
+        except Exception as exc:
+            raise BrainAdapterError(f"Hermes session model lock failed: {exc}") from exc
+        finally:
+            response.close()
+        self._model_locks.add(lock)
 
     def discover_capabilities(self) -> BrainCapabilities:
         path = self.config.get("capabilities_path")
@@ -53,9 +94,18 @@ class HermesAdapter(HTTPBrainAdapter, BaseBrainAdapter):
     def get_session_id(self, name: str, force_new: bool = False) -> str:
         state = self._load_state(self.state_path)
         if state.get(name) and not force_new:
-            return state[name]
+            session_id = state[name]
+            self._lock_session_model(session_id)
+            return session_id
+        body: dict[str, Any] = {"title": name}
+        model = str(self.config.get("model") or "").strip()
+        provider = str(self.config.get("model_provider") or "").strip()
+        if model:
+            body["model"] = model
+        if provider:
+            body["provider"] = provider
         response = self.transport.post(
-            self._url("/api/sessions"), headers=self.headers(), json={"title": name}, timeout=15
+            self._url("/api/sessions"), headers=self.headers(), json=body, timeout=15
         )
         try:
             response.raise_for_status()
@@ -64,10 +114,13 @@ class HermesAdapter(HTTPBrainAdapter, BaseBrainAdapter):
             session_id = str(session.get("id") or "") if isinstance(session, Mapping) else ""
         except Exception as exc:
             raise BrainAdapterError(f"Hermes session creation failed: {exc}") from exc
+        finally:
+            response.close()
         if not session_id:
             raise BrainAdapterError("Hermes session creation response had no id")
         state[name] = session_id
         self._save_state(self.state_path, state)
+        self._lock_session_model(session_id)
         return session_id
 
     def get_session(self, session_id: str) -> Mapping[str, Any]:
@@ -81,6 +134,8 @@ class HermesAdapter(HTTPBrainAdapter, BaseBrainAdapter):
             return self._response_payload(response)
         except Exception as exc:
             raise BrainAdapterError(f"Hermes session lookup failed: {exc}") from exc
+        finally:
+            response.close()
 
     def stop_run(self, run_id: str) -> Mapping[str, Any]:
         response = self.transport.post(

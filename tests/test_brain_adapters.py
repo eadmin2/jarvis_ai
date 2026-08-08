@@ -162,6 +162,69 @@ def test_hermes_named_session_persists_and_command_methods_match_existing_api(mo
     assert transport.calls[0][2]["headers"]["X-Hermes-Session-Key"] == "jarvis:user:main"
 
 
+def test_hermes_existing_session_is_locked_to_configured_codex_model(
+    monkeypatch, tmp_path: Path
+):
+    monkeypatch.setenv("HERMES_TEST_KEY", "secret")
+    state_path = tmp_path / "sessions.json"
+    state_path.write_text('{"jarvis-main":"session-old"}', encoding="utf-8")
+    lock_response = FakeResponse(
+        payload={"runtime": {"provider": "openai-codex", "model": "gpt-5.6-terra"}}
+    )
+    transport = FakeTransport([lock_response])
+    adapter = HermesAdapter(
+        {
+            "api_key_env": "HERMES_TEST_KEY",
+            "model_provider": "openai-codex",
+            "model": "gpt-5.6-terra",
+        },
+        transport,
+        state_path,
+    )
+
+    assert adapter.get_session_id("jarvis-main") == "session-old"
+    assert adapter.get_session_id("jarvis-main") == "session-old"
+    assert len(transport.calls) == 1
+    method, url, kwargs = transport.calls[0]
+    assert method == "POST"
+    assert url.endswith("/api/sessions/session-old/model")
+    assert kwargs["json"] == {
+        "provider": "openai-codex",
+        "model": "gpt-5.6-terra",
+    }
+    assert lock_response.closed is True
+
+
+def test_hermes_new_session_is_created_and_locked_with_configured_model(
+    monkeypatch, tmp_path: Path
+):
+    monkeypatch.setenv("HERMES_TEST_KEY", "secret")
+    create_response = FakeResponse(payload={"session": {"id": "session-terra"}})
+    lock_response = FakeResponse(
+        payload={"runtime": {"provider": "openai-codex", "model": "gpt-5.6-terra"}}
+    )
+    transport = FakeTransport([create_response, lock_response])
+    adapter = HermesAdapter(
+        {
+            "api_key_env": "HERMES_TEST_KEY",
+            "model_provider": "openai-codex",
+            "model": "gpt-5.6-terra",
+        },
+        transport,
+        tmp_path / "sessions.json",
+    )
+
+    assert adapter.get_session_id("jarvis-main") == "session-terra"
+    assert transport.calls[0][2]["json"] == {
+        "title": "jarvis-main",
+        "provider": "openai-codex",
+        "model": "gpt-5.6-terra",
+    }
+    assert transport.calls[1][1].endswith("/api/sessions/session-terra/model")
+    assert create_response.closed is True
+    assert lock_response.closed is True
+
+
 def test_gbrain_uses_configurable_routes_event_map_and_capability_discovery(tmp_path: Path):
     capabilities = FakeResponse(
         payload={"capabilities": ["streaming", "sessions", "stop", "approvals", "memory", "vision"]}

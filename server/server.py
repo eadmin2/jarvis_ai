@@ -1517,6 +1517,7 @@ async def websocket_endpoint(ws: WebSocket) -> None:
     await ws.send_json({
         "type": "status",
         "message": f"{BRAIN_PROVIDER.title()} voice server connected.",
+        "conversation": conn.conversation,
         "models": {
             "brain": brain_cfg.get("model") or f"{BRAIN_PROVIDER}-agent",
             "stt": stt_cfg.get("model", "unknown"),

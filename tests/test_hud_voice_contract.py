@@ -68,8 +68,13 @@ def test_hud_voice_contract_and_accessible_controls() -> None:
         "src.onended",
         "cancelSpeechAcknowledgements();",
         'if(value===null||value==="")return fallback',
+        'id="sessionConversation"',
+        'if(e.conversation)$("sessionConversation").textContent=e.conversation',
     }:
         assert required in source
+
+    assert 'const CONV = "jarvis-main"' not in source
+    assert "conversation:CONV" not in source
 
     # A segment is acknowledged only after its end marker, attached audio
     # sources have naturally ended, and no stop/barge-in cancellation occurred.
