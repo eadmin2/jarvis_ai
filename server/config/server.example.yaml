@@ -1,7 +1,7 @@
 # Copy to server.yaml and edit. Secrets live in ~/.hermes/.env (NOT here).
 
 brain:
-  provider: hermes            # hermes or gbrain; brain.provider takes precedence
+  provider: hermes            # Hermes is the conversational agent
 
 llm:
   provider: hermes            # legacy/default selector; anthropic is the basic fallback mode
@@ -27,23 +27,14 @@ hermes:
     more detail. Speak numbers, dates, times and phone numbers as natural
     spoken words. Never speak secrets, API keys, or passwords aloud.
 
-# Optional founder-local Gbrain backend. Set brain.provider: gbrain to enable.
-# Routes and upstream SSE event names are configurable so JARVIS does not bind
-# itself to one Gbrain build. Defaults mirror the Hermes-shaped local contract.
+# Optional founder-local Gbrain retrieval. Gbrain enriches Hermes turns with
+# personal knowledge context; it is not a streaming chat-agent replacement.
+# This invokes `gbrain query` locally and needs no HTTP listener or deployment.
 gbrain:
-  base_url: http://127.0.0.1:8767
-  api_key_env: GBRAIN_API_KEY
-  api_key_required: false
-  conversation: jarvis-main
-  timeout: 240
-  fallback_provider: anthropic
-  endpoints:
-    capabilities: /api/capabilities
-    create_session: /api/sessions
-    get_session: /api/sessions/{session_id}
-    stream: /api/sessions/{session_id}/chat/stream
-    stop: /v1/runs/{run_id}/stop
-    approval: /v1/runs/{run_id}/approval
+  enabled: false
+  command: gbrain
+  timeout: 8
+  max_context_chars: 6000
 
 stt:
   model: small.en           # LOCAL model (fallback if remote configured; primary otherwise)

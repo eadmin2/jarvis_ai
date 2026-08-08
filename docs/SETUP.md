@@ -60,10 +60,16 @@ releases treat them as optional extras and fail at runtime without them
 (silently for VAD, loudly for the engine). The first start takes 60–90 s
 (torch import + model download); subsequent starts are faster.
 
-Edit `config/server.yaml`: select `brain.provider`, select the voice provider,
-and adjust `machines:` (or delete it). The first run downloads the Whisper
-model (~460 MB for `small.en`). Gbrain is optional and is enabled by setting
-`brain.provider: gbrain`; its routes and SSE names are configurable locally.
+Edit `config/server.yaml`: keep `brain.provider: hermes`, select the voice
+provider, and adjust `machines:` (or delete it). The first run downloads the
+Whisper model (~460 MB for `small.en`).
+
+Gbrain is an optional personal-knowledge retrieval layer, not the conversational
+agent. Install and initialize its local CLI, verify `gbrain query "test"`, then
+set `gbrain.enabled: true`. JARVIS runs the CLI on loopback-only founder turns,
+frames the result as untrusted reference data, and continues with Hermes if
+Gbrain is absent, times out, or returns an error. No Gbrain HTTP server is
+required.
 
 ### TLS certificates (required for browser microphone)
 

@@ -146,3 +146,52 @@ def test_clause_chunking_and_pronunciation_are_low_latency_and_configurable() ->
         {"FAOS": "F A O S", "Gbrain": "G brain"}
     )
     assert pipeline._clean_for_tts("FAOS uses Gbrain.") == "F A O S uses G brain."
+
+
+def test_gbrain_retrieval_enriches_hermes_without_replacing_the_agent() -> None:
+    class Brain:
+        provider = "hermes"
+
+        def __init__(self):
+            self.received = ""
+
+        def get_session_id(self, _conversation):
+            return "session-1"
+
+        def chat_stream_events(self, _session_id, text, _timeout, _cancellation):
+            self.received = text
+            yield "run", "run-1"
+            yield "text", "answer"
+
+    class Context:
+        enabled = True
+
+        def query(self, text, _cancellation):
+            assert text == "what changed?"
+            return "compiled founder context"
+
+        @staticmethod
+        def augment(text, context):
+            return SERVER.GbrainContextAdapter.augment(text, context)
+
+    pipeline = SERVER.VoicePipelineServer.__new__(SERVER.VoicePipelineServer)
+    pipeline.cfg = {
+        "brain": {"provider": "hermes"},
+        "llm": {"provider": "hermes"},
+        "hermes": {"timeout": 1, "fallback_provider": ""},
+    }
+    pipeline.brain = Brain()
+    pipeline.gbrain_context = Context()
+    timing = SERVER.TurnTiming(turn_id=9)
+
+    events = list(
+        pipeline.stream_llm_events_sync(
+            "what changed?", timing, "jarvis-main", SERVER.CancellationToken()
+        )
+    )
+
+    assert events == [("run", "run-1"), ("text", "answer")]
+    assert pipeline.brain.provider == "hermes"
+    assert "compiled founder context" in pipeline.brain.received
+    assert pipeline.brain.received.endswith("Founder request:\nwhat changed?")
+    assert timing.gbrain_context_used is True

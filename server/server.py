@@ -42,7 +42,7 @@ from fastapi.responses import JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from RealtimeSTT import AudioToTextRecorder
 
-from brain import GbrainAdapter, HermesAdapter
+from brain import GbrainContextAdapter, HermesAdapter
 from voice import (
     CancellationToken,
     PronunciationDictionary,
@@ -172,6 +172,7 @@ class TurnTiming:
     interrupted: bool = False
     tools_used: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    gbrain_context_used: bool = False
 
     def summary(self) -> dict:
         eos = self.end_of_speech_monotonic
@@ -198,6 +199,7 @@ class TurnTiming:
             "end_of_speech_to_first_audio_seconds": self._delta(eos, self.first_tts_audio_byte_monotonic),
             "total_turn_seconds": self._delta(eos, self.total_done_monotonic),
             "errors": self.errors,
+            "gbrain_context_used": self.gbrain_context_used,
         }
 
     @staticmethod
@@ -340,12 +342,11 @@ class VoicePipelineServer:
             (cfg.get("brain") or {}).get("provider")
             or cfg.get("llm", {}).get("provider", "hermes")
         ).lower()
-        if brain_provider == "gbrain":
-            self.brain = GbrainAdapter(cfg)
-        elif brain_provider == "hermes":
+        if brain_provider == "hermes":
             self.brain = HermesAdapter(cfg)
         else:
             self.brain = None
+        self.gbrain_context = GbrainContextAdapter(cfg)
         # Compatibility for stop/approval call sites while the external
         # WebSocket protocol remains provider-neutral.
         self.hermes = self.brain
@@ -442,10 +443,19 @@ class VoicePipelineServer:
             (self.cfg.get("brain") or {}).get("provider") or llm["provider"]
         ).lower()
         timing.llm_start_monotonic = time.perf_counter()
-        if provider in {"hermes", "gbrain"}:
+        if provider == "hermes":
             try:
                 brain_cfg = self.cfg.get(provider) or {}
                 assert self.brain is not None
+                if self.gbrain_context.enabled:
+                    try:
+                        context = self.gbrain_context.query(transcript, cancellation)
+                        if context:
+                            transcript = self.gbrain_context.augment(transcript, context)
+                            timing.gbrain_context_used = True
+                    except Exception as exc:
+                        timing.errors.append(f"gbrain_context: {exc}")
+                        print(f"Gbrain context unavailable ({type(exc).__name__}: {exc}); continuing", flush=True)
                 session_id = self.brain.get_session_id(conversation)
                 gen = self._brain_turn(
                     session_id,
@@ -860,7 +870,7 @@ BRAIN_PROVIDER = str(
     (CFG.get("brain") or {}).get("provider")
     or CFG.get("llm", {}).get("provider", "hermes")
 ).lower()
-BRAIN = GbrainAdapter(CFG) if BRAIN_PROVIDER == "gbrain" else HermesAdapter(CFG)
+BRAIN = HermesAdapter(CFG)
 PIPELINE: VoicePipelineServer | None = None
 
 

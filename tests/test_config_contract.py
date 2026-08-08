@@ -2,7 +2,7 @@ from pathlib import Path
 
 import yaml
 
-from server.brain import GbrainAdapter, HermesAdapter
+from server.brain import GbrainContextAdapter, HermesAdapter
 from server.voice import create_tts_provider
 from server.voice.openai import OpenAITTSProvider
 
@@ -20,7 +20,7 @@ def load_example() -> dict:
 
 def test_example_selects_supported_local_brain_and_voice() -> None:
     cfg = load_example()
-    assert cfg["brain"]["provider"] in {"hermes", "gbrain"}
+    assert cfg["brain"]["provider"] == "hermes"
     provider = create_tts_provider(
         cfg["voice"], environ={"OPENAI_API_KEY": "local-test-key"}
     )
@@ -28,11 +28,12 @@ def test_example_selects_supported_local_brain_and_voice() -> None:
     assert provider.output_sample_rate == 16_000
 
 
-def test_example_constructs_both_brain_adapters_without_network() -> None:
+def test_example_constructs_hermes_and_optional_gbrain_context_without_network() -> None:
     cfg = load_example()
     assert HermesAdapter(cfg).provider == "hermes"
-    assert GbrainAdapter(cfg).provider == "gbrain"
-    assert "{session_id}" in cfg["gbrain"]["endpoints"]["stream"]
+    context = GbrainContextAdapter(cfg, which=lambda _command: None)
+    assert context.provider == "gbrain"
+    assert context.enabled is False
 
 
 def test_example_contains_no_credentials() -> None:

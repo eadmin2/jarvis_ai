@@ -8,6 +8,7 @@ from .base import (
     BrainEventType,
 )
 from .gbrain import GbrainAdapter
+from .gbrain_context import GbrainContextAdapter
 from .hermes import HermesAdapter
 
 __all__ = [
@@ -17,5 +18,6 @@ __all__ = [
     "BrainEvent",
     "BrainEventType",
     "GbrainAdapter",
+    "GbrainContextAdapter",
     "HermesAdapter",
 ]
