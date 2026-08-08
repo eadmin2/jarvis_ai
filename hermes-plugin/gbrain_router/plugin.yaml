@@ -1,0 +1,6 @@
+name: gbrain-router
+version: "1.0.0"
+description: "Founder-local deterministic Gbrain retrieval and FrankBrain routing before Hermes model calls."
+author: "FAOS local"
+hooks:
+  - pre_llm_call

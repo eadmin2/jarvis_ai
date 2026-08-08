@@ -23,6 +23,25 @@ curl -H "Authorization: Bearer $KEY" http://127.0.0.1:8642/health
 # {"status": "ok", ...}
 ```
 
+For the founder-local Codex route, authenticate Hermes with its native
+`openai-codex` flow and set both the conversational and API-session model to
+`gpt-5.6-terra` in `config.yaml`:
+
+```yaml
+model:
+  provider: openai-codex
+  default: gpt-5.6-terra
+gateway:
+  api_server:
+    model_name: gpt-5.6-terra
+security:
+  redact_secrets: true
+```
+
+This uses the Hermes Codex/ChatGPT OAuth integration. It does not launch a
+local `codex` CLI subprocess, and it does not require storing an OpenAI API key
+for conversational inference.
+
 Recommended: add voice-behavior rules to your global `~/.hermes/SOUL.md`
 (short spoken sentences, no markdown aloud, never speak secrets, announce risky
 actions and wait for approval). The agent — not the voice server — should own
@@ -70,6 +89,23 @@ set `gbrain.enabled: true`. JARVIS runs the CLI on loopback-only founder turns,
 frames the result as untrusted reference data, and continues with Hermes if
 Gbrain is absent, times out, or returns an error. No Gbrain HTTP server is
 required.
+
+When Hermes is connected to Gbrain over MCP, install the deterministic router
+to retrieve knowledge before the model call whenever the founder says
+"Gbrain", "FrankBrain", "Frank Knowledge", or expresses an explicit knowledge
+lookup intent:
+
+```bash
+cp -R hermes-plugin/gbrain_router ~/.hermes/plugins/gbrain_router
+hermes plugins enable gbrain-router
+# restart the Hermes gateway
+```
+
+The plugin calls the current MCP names `mcp__gbrain__query` and
+`mcp__gbrain__search`, bounds and labels returned text as untrusted context,
+and asks for page-slug citations. Write language never causes an automatic
+mutation: Hermes must make an explicit `mcp__gbrain__put_page` tool call after
+deriving a clear slug and page body.
 
 ### TLS certificates (required for browser microphone)
 
