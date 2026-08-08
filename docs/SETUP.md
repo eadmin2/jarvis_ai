@@ -131,6 +131,31 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.jarvis.dashboard.pli
 TCC permissions and log-path location) that produce silent hangs or `EX_CONFIG`
 errors if ignored. Day-to-day management: `scripts/jarvis-{start,stop,restart,health}.sh`.
 
+### Founder-local FrankBrain refresh
+
+FrankBrain uses a loop-safe two-lane sync; Hermes/Jarvis continues to query the
+canonical knowledge backend directly. Canonical pages flow into the generated
+`wiki/frankbrain/` visualization projection. LLM Wiki-authored pages created by
+Save to Wiki or auto-ingest flow back into the dedicated federated `frankbrain`
+source. Projection files and app aggregates never flow back.
+
+Register the write-back source once, then install the stable local scripts and
+LaunchAgent definition. It refreshes every fifteen minutes and at login:
+
+```bash
+python3 server/scripts/install_frankbrain_refresh.py --install
+gbrain sources add frankbrain \
+  --path "$HOME/Library/Application Support/FrankBrain/writeback" \
+  --name "FrankBrain authored pages" --federated --force
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.frankbrain.refresh.plist
+```
+
+The sync is lock-protected and updates changed Markdown files atomically. It
+does not propagate deletions into Gbrain; deletion remains an explicit governed
+operation. Generated projection pages should be treated as read-only because a
+later canonical refresh replaces them. The job opens no network listener and
+writes its log to `~/Library/Logs/frankbrain-refresh.log`.
+
 ## 5. Optional extras
 
 **Push-to-talk client** (Windows/Linux box with a mic):

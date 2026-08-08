@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Founder-local, loop-safe two-lane sync between the canonical knowledge
+     backend and the FrankBrain LLM Wiki project. The installer replaces
+     SYNC_SCRIPT and YOUR_USER before copying this file. -->
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.frankbrain.refresh</string>
+  <key>ProgramArguments</key><array>
+    <string>/opt/homebrew/bin/python3</string>
+    <string>SYNC_SCRIPT</string>
+    <string>--project</string><string>/Users/YOUR_USER/Projects/FrankBrain</string>
+    <string>--staging</string><string>/Users/YOUR_USER/Library/Application Support/FrankBrain/writeback</string>
+    <string>--gbrain</string><string>/Users/YOUR_USER/.bun/bin/gbrain</string>
+    <string>--write</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>StartInterval</key><integer>900</integer>
+  <key>ProcessType</key><string>Background</string>
+  <key>LowPriorityIO</key><true/>
+  <key>StandardOutPath</key><string>/Users/YOUR_USER/Library/Logs/frankbrain-refresh.log</string>
+  <key>StandardErrorPath</key><string>/Users/YOUR_USER/Library/Logs/frankbrain-refresh.log</string>
+  <key>EnvironmentVariables</key><dict>
+    <key>PATH</key><string>/Users/YOUR_USER/.bun/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <!-- This local DB/file sync does not need agent-facing MCP credentials. -->
+    <key>GBRAIN_MCP_TOKEN_CODEX</key><string></string>
+    <key>GBRAIN_MCP_TOKEN_CLAUDE_CODE</key><string></string>
+  </dict>
+</dict></plist>

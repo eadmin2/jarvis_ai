@@ -11,20 +11,71 @@ from __future__ import annotations
 
 import argparse
 import base64
+import fcntl
 import json
+import os
 import re
 import subprocess
+import tempfile
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Iterator
 
 
 DEFAULT_PSQL = "/opt/homebrew/opt/postgresql@17/bin/psql"
+WRITEBACK_SOURCE_ID = "frankbrain"
 DEFAULT_TOPICS = (
     "hermes | jarvis | gbrain | faos | founder | voice | dashboard | "
     "agentic | governance | research | ra22 | ra6"
 )
 SAFE_COMPONENT = re.compile(r"[^A-Za-z0-9._-]+")
+
+
+class RefreshAlreadyRunning(RuntimeError):
+    """Raised when another FrankBrain projection owns the refresh lock."""
+
+
+@contextmanager
+def _exclusive_lock(path: Path) -> Iterator[None]:
+    """Hold a non-blocking process lock for one projection refresh."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = path.open("a+", encoding="utf-8")
+    try:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise RefreshAlreadyRunning(str(path)) from exc
+        yield
+    finally:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            handle.close()
+
+
+def _write_text_if_changed(destination: Path, content: str) -> bool:
+    """Atomically replace a projection file only when its content changed."""
+    try:
+        if destination.read_text(encoding="utf-8") == content:
+            return False
+    except FileNotFoundError:
+        pass
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary_name = tempfile.mkstemp(
+        prefix=f".{destination.name}.", suffix=".tmp", dir=destination.parent
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return True
 
 
 def safe_slug_path(slug: str) -> Path:
@@ -49,6 +100,7 @@ COPY (
       FROM pages p
      WHERE p.deleted_at IS NULL
        AND p.page_kind = 'markdown'
+       AND p.source_id <> '{WRITEBACK_SOURCE_ID}'
        AND octet_length(p.compiled_truth) <= {max_bytes}
        AND (
          p.search_vector @@ to_tsquery('english', '{DEFAULT_TOPICS}')
@@ -94,6 +146,7 @@ COPY (
         JOIN pages p ON p.id = s.id
        WHERE p.deleted_at IS NULL
          AND p.page_kind = 'markdown'
+         AND p.source_id <> '{WRITEBACK_SOURCE_ID}'
          AND octet_length(p.compiled_truth) <= {max_bytes}
        ORDER BY s.tier, s.rank DESC, p.updated_at DESC
        LIMIT {total_limit}
@@ -183,10 +236,7 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main() -> int:
-    args = build_parser().parse_args()
-    if args.seed_limit > args.limit:
-        raise SystemExit("--seed-limit cannot exceed --limit")
+def _run(args: argparse.Namespace) -> int:
     rows = _read_rows(args)
     projected: list[dict[str, Any]] = []
     for row in rows:
@@ -206,10 +256,10 @@ def main() -> int:
 
     output_dir = args.project.resolve() / "wiki" / "frankbrain"
     output_dir.mkdir(parents=True, exist_ok=True)
+    updated_files = 0
     for row, item in zip(rows, projected, strict=True):
         destination = output_dir / item["path"]
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_text(_render_page(row), encoding="utf-8")
+        updated_files += _write_text_if_changed(destination, _render_page(row))
 
     manifest = {
         **summary,
@@ -217,13 +267,41 @@ def main() -> int:
         "display_name": "FrankBrain",
         "source_backend": "gbrain",
         "direction": "gbrain-to-frankbrain",
+        "updated_files": updated_files,
+        "unchanged_files": len(projected) - updated_files,
         "files": projected,
     }
-    (output_dir / "projection-manifest.json").write_text(
-        json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    _write_text_if_changed(
+        output_dir / "projection-manifest.json",
+        json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
     )
-    print(json.dumps(summary, indent=2))
+    print(json.dumps({**summary, "updated_files": updated_files}, indent=2))
     return 0
+
+
+def main() -> int:
+    args = build_parser().parse_args()
+    if args.seed_limit > args.limit:
+        raise SystemExit("--seed-limit cannot exceed --limit")
+    if not args.write:
+        return _run(args)
+
+    lock_path = args.project.resolve() / ".frankbrain-refresh.lock"
+    try:
+        with _exclusive_lock(lock_path):
+            return _run(args)
+    except RefreshAlreadyRunning:
+        print(
+            json.dumps(
+                {
+                    "mode": "skipped",
+                    "project": str(args.project),
+                    "reason": "refresh-already-running",
+                },
+                indent=2,
+            )
+        )
+        return 0
 
 
 if __name__ == "__main__":
