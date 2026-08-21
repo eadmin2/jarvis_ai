@@ -206,8 +206,13 @@ class HermesAPI:
         sid = state.get(name)
         if sid and not force_new:
             return sid
+        # Hermes enforces unique session titles, so a stable per-conversation
+        # title (e.g. "jarvis-main") collides with the previous session on
+        # every force_new — mint a unique title while keeping `name` as the
+        # stable lookup key in our own state file.
+        title = f"{name} — {time.strftime('%Y-%m-%d %H:%M:%S')}"
         r = requests.post(f"{self.base}/api/sessions", headers=self.headers(),
-                          json={"title": name}, timeout=15)
+                          json={"title": title}, timeout=15)
         r.raise_for_status()
         data = r.json()
         sid = (data.get("session") or data).get("id")
@@ -769,6 +774,15 @@ async def hud_chat(request: Request) -> JSONResponse:
     conversation = body.get("conversation") or (CFG.get("hermes") or {}).get("conversation", "jarvis-main")
     if not text:
         return JSONResponse({"error": "empty input"}, status_code=400)
+
+    # /new and /reset are handled locally: they never reach the model. This
+    # was previously advertised in the UI (placeholder text, clear-button
+    # hint) but not actually implemented — the client just wiped the visible
+    # feed while silently continuing the same Hermes session/history.
+    if re.match(r"^/(new|reset)\b", text, re.I):
+        HERMES.get_session_id(conversation, force_new=True)
+        return JSONResponse({"text": "Started a new session.", "tools": [], "run_id": None})
+
     out: dict = {"text": "", "tools": [], "run_id": None}
 
     def run_sync() -> None:
