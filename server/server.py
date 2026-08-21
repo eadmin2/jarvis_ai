@@ -227,10 +227,20 @@ class HermesAPI:
 
     def chat_stream_events(self, session_id: str, input_text: str, timeout: float) -> Iterator[tuple[str, str]]:
         """Yield ("run"|"text"|"tool"|"approval"|"final", value) from a session turn."""
+        payload = {
+            "message": input_text,
+            "instructions": self.cfg.get("instructions") or "",
+            # Voice turns should optimize for low latency over deep reasoning.
+            "model_options": self.cfg.get("model_options") or {"reasoning_effort": "minimal"},
+        }
+        if self.cfg.get("model"):
+            payload["model"] = self.cfg["model"]
+        if self.cfg.get("provider"):
+            payload["provider"] = self.cfg["provider"]
         resp = requests.post(
             f"{self.base}/api/sessions/{session_id}/chat/stream",
             headers={**self.headers(), "Accept": "text/event-stream"},
-            json={"input": input_text}, stream=True, timeout=(10, timeout),
+            json=payload, stream=True, timeout=(10, timeout),
         )
         if resp.status_code >= 400:
             resp.close()
