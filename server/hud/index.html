@@ -302,6 +302,8 @@ footer{
       <div class="kv"><span>Memory scope</span><b>jarvis:user:main</b></div>
       <div class="kv"><span>Active sessions</span><b id="hSessions">—</b></div>
       <div class="kv"><span>Running agents</span><b id="hAgents">—</b></div>
+      <div class="kv"><span>Voice engine</span><b id="voiceProviderLabel">—</b></div>
+      <button class="btn" id="voiceProviderBtn" style="width:100%;margin-top:6px" title="Switch between ElevenLabs and self-hosted Kokoro TTS">SWITCH VOICE ENGINE</button>
     </div>
   </div>
 
@@ -749,7 +751,25 @@ async function refreshUsage(){
     }
   }catch{}
 }
-refreshHealth();refreshSkills();refreshJobs();refreshMachines();refreshUsage();
+async function refreshVoiceProvider(){
+  try{
+    const r=await fetch("/api/tts-provider"); const j=await r.json();
+    const label=j.provider==="kokoro"?"Kokoro (self-hosted)":"ElevenLabs";
+    $("voiceProviderLabel").textContent=label;
+    $("voiceProviderBtn").textContent=j.provider==="kokoro"?"SWITCH TO ELEVENLABS":"SWITCH TO KOKORO";
+  }catch{ $("voiceProviderLabel").textContent="unavailable"; }
+}
+$("voiceProviderBtn").onclick=async()=>{
+  const btn=$("voiceProviderBtn"); const goingTo=btn.textContent.includes("KOKORO")?"kokoro":"elevenlabs";
+  btn.disabled=true;
+  try{
+    const r=await fetch("/api/tts-provider",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({provider:goingTo})});
+    if(!r.ok){const e=await r.json().catch(()=>({}));addMsg("sys","voice switch failed: "+(e.error||r.status));}
+    else addMsg("sys","voice engine switched to "+goingTo);
+  }catch(err){addMsg("sys","voice switch failed: "+err.message);}
+  finally{ btn.disabled=false; refreshVoiceProvider(); }
+};
+refreshHealth();refreshSkills();refreshJobs();refreshMachines();refreshUsage();refreshVoiceProvider();
 setInterval(refreshUsage,60000);
 setInterval(refreshHealth,15000); setInterval(refreshJobs,60000); setInterval(refreshMachines,10000);
 setInterval(refreshSkills,120000);

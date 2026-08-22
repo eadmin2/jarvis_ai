@@ -35,6 +35,7 @@ import requests
 import uvicorn
 import yaml
 import numpy as np
+from scipy.signal import resample_poly
 from anthropic import Anthropic
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, RedirectResponse, Response
@@ -451,20 +452,95 @@ class VoicePipelineServer:
 
     # ------------------------------------------------------------------ TTS
 
+    _KOKORO_CLAUSE_SPLIT_RE = re.compile(r"(?<=[,;:\u2014\u2013])\s+")
+
+    @classmethod
+    def _split_into_clauses(cls, text: str, min_chars: int) -> list[str]:
+        """Split on clause punctuation (comma/semicolon/colon/dash), merging
+        short fragments so no clause falls under min_chars. Disabled (returns
+        [text] unchanged) if there's nothing to split on. This exists ONLY to
+        reduce Kokoro's time-to-first-audio on long sentences: it is CPU-bound
+        and non-streaming per call (see _tts_chunks_kokoro), so synthesizing
+        and speaking a short first clause while later clauses are still being
+        requested cuts perceived latency substantially, at the cost of a tiny
+        gap between clauses. ElevenLabs is unaffected by this entirely.
+        """
+        parts = [p.strip() for p in cls._KOKORO_CLAUSE_SPLIT_RE.split(text) if p.strip()]
+        if len(parts) <= 1:
+            return [text]
+        merged: list[str] = []
+        buf = ""
+        for p in parts:
+            buf = f"{buf} {p}".strip() if buf else p
+            if len(buf) >= min_chars:
+                merged.append(buf)
+                buf = ""
+        if buf:
+            if merged:
+                merged[-1] = f"{merged[-1]} {buf}"
+            else:
+                merged.append(buf)
+        return merged
+
+    def _tts_chunks_kokoro(self, text: str, pcfg: dict, timing: TurnTiming) -> Iterator[bytes]:
+        """Kokoro-FastAPI (self-hosted, OpenAI-compatible) TTS.
+
+        Kokoro's raw PCM output is fixed at 24 kHz; the HUD client hardcodes
+        16 kHz PCM playback, so we resample 24k -> 16k (an exact 3:2 ratio,
+        no fractional-rate artifacts) before handing bytes to the websocket.
+
+        chunk_clauses (default True): split long sentences into clauses and
+        request/yield them one at a time, so the first bit of audio is ready
+        much sooner than waiting for the whole sentence. Set chunk_clauses:
+        false in server.yaml's voice.kokoro block to fully disable and revert
+        to one Kokoro call per sentence (the original, simpler behavior).
+        """
+        base_url = pcfg.get("kokoro_url", "http://localhost:8880").rstrip("/")
+        if pcfg.get("chunk_clauses", True):
+            clauses = self._split_into_clauses(text, pcfg.get("min_clause_chars", 25))
+        else:
+            clauses = [text]
+        for clause in clauses:
+            payload = {
+                "model": "kokoro",
+                "input": clause,
+                "voice": pcfg["voice_id"],
+                "response_format": "pcm",
+                "stream": False,
+            }
+            response = requests.post(f"{base_url}/v1/audio/speech", json=payload, timeout=60)
+            if response.status_code >= 400:
+                raise RuntimeError(f"Kokoro HTTP {response.status_code}: {response.text[:1000]}")
+            raw = np.frombuffer(response.content, dtype="<i2")
+            if raw.size == 0:
+                continue
+            resampled = resample_poly(raw.astype(np.float32), 2, 3)  # 24kHz -> 16kHz
+            pcm16 = np.clip(resampled, -32768, 32767).astype("<i2").tobytes()
+            chunk_size = 4096
+            for i in range(0, len(pcm16), chunk_size):
+                if timing.first_tts_audio_byte_monotonic is None:
+                    timing.first_tts_audio_byte_monotonic = time.perf_counter()
+                yield pcm16[i:i + chunk_size]
+
     def tts_chunks_sync(self, text: str, timing: TurnTiming) -> Iterator[bytes]:
         voice = self.cfg["voice"]
+        provider = voice.get("provider", "elevenlabs")
+        pcfg = voice.get(provider, voice)  # nested per-provider config, flat dict as fallback
+        timing.tts_model = pcfg.get("model", provider)
+        timing.voice_id = pcfg.get("voice_id")
+        timing.tts_request_start_monotonic = timing.tts_request_start_monotonic or time.perf_counter()
+        record_usage(tts_chars=len(text))
+        if provider == "kokoro":
+            yield from self._tts_chunks_kokoro(text, pcfg, timing)
+            return
         key = os.environ.get("ELEVENLABS_API_KEY") or os.environ.get("ELEVEN_API_KEY") or os.environ.get("XI_API_KEY")
         if not key:
             raise RuntimeError("ElevenLabs API key not found")
-        timing.tts_model = voice["model"]
-        timing.voice_id = voice["voice_id"]
-        timing.tts_request_start_monotonic = timing.tts_request_start_monotonic or time.perf_counter()
-        record_usage(tts_chars=len(text))
-        url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice['voice_id']}/stream"
-        params = {"output_format": voice.get("output_format", "pcm_16000")}
+        url = f"https://api.elevenlabs.io/v1/text-to-speech/{pcfg['voice_id']}/stream"
+        params = {"output_format": pcfg.get("output_format", "pcm_16000")}
         payload = {
             "text": text,
-            "model_id": voice["model"],
+            "model_id": pcfg["model"],
             "voice_settings": {
                 "stability": 0.55, "similarity_boost": 0.70,
                 "style": 0.10, "use_speaker_boost": True,
@@ -912,6 +988,30 @@ async def usage() -> JSONResponse:
 
 
 WS_CLIENTS: set = set()
+
+
+@app.get("/api/tts-provider")
+async def get_tts_provider() -> JSONResponse:
+    voice = CFG["voice"]
+    return JSONResponse({
+        "provider": voice.get("provider", "elevenlabs"),
+        "available": [p for p in ("elevenlabs", "kokoro") if p in voice],
+        "voice_name": voice.get(voice.get("provider", "elevenlabs"), {}).get("voice_name"),
+    })
+
+
+@app.post("/api/tts-provider")
+async def set_tts_provider(request: Request) -> JSONResponse:
+    body = await request.json()
+    provider = body.get("provider")
+    voice = CFG["voice"]
+    if provider not in ("elevenlabs", "kokoro"):
+        return JSONResponse({"error": "provider must be \'elevenlabs\' or \'kokoro\'"}, status_code=400)
+    if provider not in voice:
+        return JSONResponse({"error": f"no config for provider \'{provider}\' in server.yaml"}, status_code=400)
+    voice["provider"] = provider  # in-memory only; server.yaml keeps the boot-time default
+    return JSONResponse({"provider": provider, "voice_name": voice[provider].get("voice_name")})
+
 
 
 @app.post("/api/summon")

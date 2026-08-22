@@ -65,11 +65,29 @@ security:
   extra_origin_hosts: []            # e.g. ["192.168.1.10"] if you open the HUD by raw IP
 
 voice:
-  provider: elevenlabs
-  model: eleven_flash_v2_5
-  voice_name: "Your chosen voice"
-  voice_id: YOUR_ELEVENLABS_VOICE_ID
-  output_format: pcm_16000
+  provider: elevenlabs        # active provider; also switchable live from the HUD (POST /api/tts-provider)
+  elevenlabs:
+    model: eleven_flash_v2_5
+    voice_name: "Your chosen voice"
+    voice_id: YOUR_ELEVENLABS_VOICE_ID
+    output_format: pcm_16000
+  kokoro:                      # optional: self-hosted, free, unlimited TTS via
+                                # https://github.com/remsky/Kokoro-FastAPI (run it
+                                # anywhere reachable -- same LAN, another VPS, etc.)
+    kokoro_url: "http://YOUR_KOKORO_HOST:8880"
+    voice_name: "af_heart"     # any of Kokoro's ~68 built-in voices
+    voice_id: af_heart
+    model: kokoro
+    chunk_clauses: true        # split long sentences on commas/semicolons so first
+                                # audio arrives sooner -- Kokoro is CPU-bound and
+                                # synthesizes one full sentence per call (no true
+                                # token-level streaming like ElevenLabs), so without
+                                # this a long reply can take several seconds of
+                                # silence before Jarvis starts speaking. Set false
+                                # to synthesize each sentence in one call instead.
+    min_clause_chars: 25       # clauses shorter than this get merged into a neighbor,
+                                # so short fragments don't turn into their own tiny,
+                                # overhead-heavy Kokoro request
 
 persona:                     # used only by the anthropic fallback path
   system_prompt: >
