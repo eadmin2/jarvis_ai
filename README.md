@@ -40,6 +40,7 @@ The HUD around the ring is a real control center:
   through a bundled Hermes plugin (`hud_display`); panels can fly into
   left/right thirds, and "clear the screen" sweeps them away
 - **Usage tracking** — tokens/day, turns, ElevenLabs quota bar
+- **Conversation history** — every turn is logged to `logs/conversation_history.jsonl`; open it any time from the VIEWS panel to scroll back through what you and Jarvis said, filterable per conversation
 - **Machines panel** — live CPU/GPU stats for the host and remote workers
 - **Cinematic boot** — press `B`: panels flicker in, ring spins up,
   "Systems online. Good morning."
