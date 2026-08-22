@@ -18,8 +18,13 @@
    (incl. `interrupted` flag), `run.completed` (token usage), `*approval*`
    (→ HUD approval cards).
 5. Text is sentence-split, markdown/think-block-stripped, **secret-redacted**,
-   then each sentence streams through ElevenLabs back to the client as raw PCM
-   while generation continues.
+   then each sentence is synthesized by the active TTS provider
+   (`voice.provider`: `elevenlabs` or `kokoro`, switchable live via
+   `POST /api/tts-provider`, no restart) and streamed back to the client as
+   raw 16 kHz PCM while generation continues. ElevenLabs streams natively;
+   Kokoro is CPU-bound and non-streaming per call, so long sentences are
+   split on clause punctuation first (`voice.kokoro.chunk_clauses`) so the
+   first bit of audio doesn't wait on the whole sentence.
 
 Why the Sessions API and not `/v1/responses` or `/v1/runs`: on Hermes v0.16,
 sessions are the only surface that combines named persistent memory, run ids,
@@ -59,6 +64,7 @@ approval_request{data,run_id} · error · done{timing}
 | `/api/chat` | typed chat turn on the shared voice session |
 | `/api/machines` | host psutil stats + remote workers from config |
 | `/api/usage` | local token/char tally + ElevenLabs quota (needs user_read on the key) |
+| `/api/tts-provider` | `GET` returns the active TTS provider (`elevenlabs`/`kokoro`) and its voice name; `POST {"provider": ...}` switches it in memory (resets to the `server.yaml` default on restart) |
 | `/api/history` | `GET /api/history?limit=100&conversation=NAME` — recent turns (`{ts, iso, conversation, user, jarvis}`) from the append-only `logs/conversation_history.jsonl`, filterable by conversation, used by the HUD history drawer |
 | `/api/summon` | broadcasts a holographic media panel (`{media, src, title, position}` or `{action:"dismiss"}`) to every connected HUD over its WebSocket — this is what the bundled `hud_display` Hermes plugin calls |
 | port 9443 (separate app) | TLS reverse proxy of the Hermes dashboard with WebSocket bridge and frame-header stripping, so the HTTPS HUD can iframe it |

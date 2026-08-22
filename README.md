@@ -7,8 +7,9 @@ memory, terminal access, web search, file tools, and 80+ skills — through a
 glowing arc-reactor HUD in any browser on your LAN, or a push-to-talk client.
 
 **Everything runs on your own hardware.** The only cloud calls are your LLM
-provider (via Hermes) and ElevenLabs for the voice. Speech-to-text is fully
-local (Whisper on CPU).
+provider (via Hermes) and, by default, ElevenLabs for the voice — or skip that
+entirely with the free, self-hosted Kokoro TTS engine, switchable live from the
+HUD with no restart. Speech-to-text is fully local (Whisper on CPU).
 
 ## Demo
 
@@ -40,6 +41,8 @@ The HUD around the ring is a real control center:
   through a bundled Hermes plugin (`hud_display`); panels can fly into
   left/right thirds, and "clear the screen" sweeps them away
 - **Usage tracking** — tokens/day, turns, ElevenLabs quota bar
+- **Switchable voice engine** — flip between ElevenLabs and a free,
+  self-hosted Kokoro TTS engine live from the HUD, no restart needed
 - **Conversation history** — every turn is logged to `logs/conversation_history.jsonl`; open it any time from the VIEWS panel to scroll back through what you and Jarvis said, filterable per conversation
 - **Machines panel** — live CPU/GPU stats for the host and remote workers
 - **Cinematic boot** — press `B`: panels flicker in, ring spins up,
@@ -78,7 +81,9 @@ restart.
   configured with an LLM provider
 - Python 3.11+
 - An [ElevenLabs](https://elevenlabs.io) API key (free tier works; ~0.5
-  credits/char on Flash)
+  credits/char on Flash) — or run [Kokoro-FastAPI](https://github.com/remsky/Kokoro-FastAPI) yourself instead, a free
+  self-hosted TTS engine (see `voice.kokoro` in `config/server.example.yaml`);
+  both can be configured at once and switched live from the HUD
 - Any modern browser on the LAN
 
 ## Install
