@@ -51,6 +51,7 @@ CONFIG_PATH = ROOT / "config" / "server.yaml"
 LOG_PATH = ROOT / "logs" / "latency.jsonl"
 STATE_PATH = ROOT / "logs" / "hermes_sessions.json"
 USAGE_PATH = ROOT / "logs" / "usage_stats.json"
+HISTORY_PATH = ROOT / "logs" / "conversation_history.jsonl"
 _USAGE_LOCK = threading.Lock()
 
 
@@ -138,6 +139,7 @@ class TurnTiming:
     interrupted: bool = False
     tools_used: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    conversation: str = "jarvis-main"
 
     def summary(self) -> dict:
         eos = self.end_of_speech_monotonic
@@ -637,6 +639,17 @@ class VoicePipelineServer:
         with LOG_PATH.open("a", encoding="utf-8") as f:
             f.write(json.dumps(summary, ensure_ascii=False) + "\n")
         print("TURN TIMING", json.dumps(summary, ensure_ascii=False), flush=True)
+        # Save to conversation history (only meaningful turns)
+        if summary.get("transcript") or summary.get("response_text"):
+            hist_entry = {
+                "ts": time.time(),
+                "iso": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "conversation": timing.conversation,
+                "user": summary.get("transcript", ""),
+                "jarvis": summary.get("response_text", ""),
+            }
+            with HISTORY_PATH.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(hist_entry, ensure_ascii=False) + "\n")
 
 
 load_env()
@@ -823,9 +836,26 @@ async def hud_chat(request: Request) -> JSONResponse:
 _ELEVEN_CACHE: dict = {"ts": 0.0, "data": None}
 
 
+@app.get("/api/history")
+async def get_history(limit: int = 100, conversation: str = "") -> JSONResponse:
+    """Return recent conversation turns from history log."""
+    if not HISTORY_PATH.exists():
+        return JSONResponse({"turns": []})
+    lines = HISTORY_PATH.read_text(encoding="utf-8").strip().splitlines()
+    turns = []
+    for line in lines:
+        try:
+            entry = json.loads(line)
+            if conversation and entry.get("conversation") != conversation:
+                continue
+            turns.append(entry)
+        except Exception:
+            pass
+    return JSONResponse({"turns": turns[-limit:]})
+
+
 @app.get("/api/usage")
 async def usage() -> JSONResponse:
-    """LLM token usage (local tally) + ElevenLabs subscription quota."""
     u = read_usage()
     cost_cfg = CFG.get("usage") or {}
     cin = float(cost_cfg.get("llm_cost_per_mtok_input", 0) or 0)
@@ -1187,6 +1217,7 @@ async def websocket_endpoint(ws: WebSocket) -> None:
                     conn.last_partial_bytes = 0
                     conn.recording = True
                     conn.timing = TurnTiming(turn_id=pipeline.next_turn_id())
+                    conn.timing.conversation = conn.conversation
                     conn.timing.audio_start_monotonic = time.perf_counter()
                     conn.timing.stt_model = CFG["stt"]["model"]
                     await ws.send_json({"type": "status", "message": f"Turn {conn.timing.turn_id} recording started."})

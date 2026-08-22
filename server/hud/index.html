@@ -226,6 +226,21 @@ body.booted header{animation:panelIn .4s backwards}
 #skillsList,#jobsList{max-height:130px; overflow-y:auto; font-size:12.5px}
 #toolsetList{max-height:170px; overflow-y:auto; scrollbar-width:thin}
 #skillsList div,#jobsList div{padding:1.5px 0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+
+/* ---------------- history drawer ---------------- */
+#historyDrawer{position:fixed; inset:0; z-index:50; display:none; align-items:flex-start; justify-content:flex-end; background:#02060cd9; backdrop-filter:blur(4px)}
+#historyDrawer.open{display:flex}
+#historyBox{width:min(680px,96vw); height:100vh; background:#050b14; border-left:1px solid var(--cyan-dim);
+  box-shadow:-4px 0 40px #00e5ff22; display:flex; flex-direction:column; animation:slideIn .3s ease}
+@keyframes slideIn{from{transform:translateX(100%)}to{transform:none}}
+#historyBar{display:flex; align-items:center; justify-content:space-between; height:44px; padding:0 16px;
+  border-bottom:1px solid var(--line); background:#081523; flex-shrink:0}
+#historyBar h3{font-family:'Orbitron'; font-size:12px; letter-spacing:4px; color:var(--cyan); text-shadow:0 0 10px #00e5ff66}
+#historyList{flex:1; overflow-y:auto; padding:10px 14px; display:flex; flex-direction:column; gap:10px; scrollbar-width:thin}
+.hturn{border:1px solid var(--line); background:#08152399; padding:8px 12px}
+.hturn .hts{font-size:10px; color:var(--txt-dim); letter-spacing:1px; margin-bottom:5px}
+.hturn .hu{font-size:13.5px; color:#cfeefb; padding:4px 8px; border-left:2px solid #205a6e; margin-bottom:5px}
+.hturn .hj{font-size:13.5px; color:var(--txt); padding:4px 8px; border-left:2px solid var(--cyan)}
 footer{
   grid-column:1/4; display:flex; align-items:center; justify-content:space-between;
   font-size:11px; letter-spacing:2px; color:var(--txt-dim); padding:0 14px;
@@ -280,6 +295,7 @@ footer{
       <button class="btn viewBtn" onclick="openView('KANBAN','/kanban')">▸ KANBAN BOARD</button>
       <button class="btn viewBtn" onclick="openView('HERMES DASHBOARD','/')">▸ HERMES DASHBOARD</button>
       <button class="btn viewBtn" onclick="openView('CHAT','/chat')">▸ DASHBOARD CHAT</button>
+      <button class="btn viewBtn" onclick="openHistory()">▸ CONVERSATION HISTORY</button>
     </div>
     <div class="panel"><h2><span>SESSION</span><span class="num">05</span></h2>
       <div class="kv"><span>Conversation</span><b>jarvis-main</b></div>
@@ -356,6 +372,16 @@ footer{
     <span id="footMsg">READY</span>
     <span>NOUS HERMES AGENT v0.16</span>
   </footer>
+</div>
+
+<div id="historyDrawer">
+  <div id="historyBox">
+    <div id="historyBar">
+      <h3>CONVERSATION HISTORY</h3>
+      <button class="btn danger" id="historyClose">✕ CLOSE</button>
+    </div>
+    <div id="historyList"><div class="msg sys">Loading…</div></div>
+  </div>
 </div>
 
 <script>
@@ -880,6 +906,31 @@ addEventListener("keydown",e=>{
 bootSequence(new URLSearchParams(location.search).get("boot")==="full");
 
 addMsg("sys","Jarvis HUD online. Click the ring or press Space to talk.");
+
+/* ============================== history drawer ===================== */
+async function openHistory(){
+  $("historyDrawer").classList.add("open");
+  const list=$("historyList");
+  list.innerHTML="<div class='msg sys'>Loading\u2026</div>";
+  try{
+    const r=await fetch("/api/history?limit=200&conversation="+encodeURIComponent(CONV));
+    const j=await r.json();
+    const turns=j.turns||[];
+    if(!turns.length){list.innerHTML="<div class='msg sys'>No history yet \u2014 starts recording from now on.</div>";return}
+    list.innerHTML="";
+    for(const t of turns){
+      const d=document.createElement("div"); d.className="hturn";
+      const esc=s=>String(s||"").replace(/[<>&]/g,c=>({"<":"&lt;",">":"&gt;","&":"&amp;"}[c]));
+      const dt=t.iso?new Date(t.iso).toLocaleString():"";
+      d.innerHTML='<div class="hts">'+esc(dt)+'</div>'+(t.user?'<div class="hu">'+esc(t.user)+'</div>':"")+(t.jarvis?'<div class="hj">'+esc(t.jarvis)+'</div>':"");
+      list.appendChild(d);
+    }
+    list.scrollTop=list.scrollHeight;
+  }catch(err){list.innerHTML="<div class='msg sys'>Error: "+err.message+"</div>";}
+}
+$("historyClose").onclick=()=>$("historyDrawer").classList.remove("open");
+$("historyDrawer").addEventListener("click",e=>{if(e.target.id==="historyDrawer")$("historyDrawer").classList.remove("open")});
+addEventListener("keydown",e=>{if(e.key==="Escape"&&$("historyDrawer").classList.contains("open"))$("historyDrawer").classList.remove("open")});
 </script>
 </body>
 </html>
