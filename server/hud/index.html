@@ -223,9 +223,9 @@ body.booted header{animation:panelIn .4s backwards}
 #activity{max-height:150px; overflow-y:auto; font-size:12.5px}
 #activity div{padding:2px 0; color:var(--txt-dim)}
 #activity div b{color:var(--amber)}
-#skillsList,#jobsList{max-height:130px; overflow-y:auto; font-size:12.5px}
+#skillsList,#jobsList,#activeTasksList{max-height:130px; overflow-y:auto; font-size:12.5px}
 #toolsetList{max-height:170px; overflow-y:auto; scrollbar-width:thin}
-#skillsList div,#jobsList div{padding:1.5px 0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+#skillsList div,#jobsList div,#activeTasksList div{padding:1.5px 0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
 
 /* ---------------- history drawer ---------------- */
 #historyDrawer{position:fixed; inset:0; z-index:50; display:none; align-items:flex-start; justify-content:flex-end; background:#02060cd9; backdrop-filter:blur(4px)}
@@ -351,6 +351,10 @@ footer{
     </div>
     <div class="panel"><h2><span>AUTOMATIONS</span><span class="num">10</span></h2>
       <div id="jobsList"><div>—</div></div>
+    </div>
+    <div class="panel"><h2><span>ACTIVE TASKS</span><span class="num">11</span></h2>
+      <button class="btn" id="syncTasksBtn" style="width:100%;margin-bottom:6px">⟳ SYNC CLICKUP</button>
+      <div id="activeTasksList"><div style="color:var(--txt-dim)">— press sync —</div></div>
     </div>
   </div>
 
@@ -638,6 +642,7 @@ async function toggleTalk(){
   setState("listening","LISTENING","CLICK AGAIN TO SEND");
 }
 $("talkBtn").onclick=toggleTalk;
+$("syncTasksBtn").onclick=syncClickUpTasks;
 $("reactorWrap").onclick=toggleTalk;
 $("stopBtn").onclick=stopRun;
 
@@ -714,6 +719,18 @@ async function refreshJobs(){
       `<div>▸ ${x.name||x.prompt?.slice(0,38)||x.id} <span class="${x.paused?"warn":"ok"}">${x.paused?"paused":"on"}</span></div>`).join("")
       :"<div>— none —</div>";
   }catch{ $("jobsList").innerHTML="<div>—</div>"; }
+}
+async function syncClickUpTasks(){
+  const el=$("activeTasksList");
+  const esc=s=>String(s||"").replace(/[<>&]/g,c=>({"<":"&lt;",">":"&gt;","&":"&amp;"}[c]));
+  el.innerHTML="<div style='color:var(--txt-dim)'>syncing…</div>";
+  try{
+    const r=await fetch("/api/clickup-tasks"); const j=await r.json();
+    const tasks=j.tasks||[];
+    el.innerHTML=tasks.length
+      ? tasks.map(t=>`<div>▸ ${esc(t.name)}</div>`).join("")
+      : "<div>— no active tasks —</div>";
+  }catch(e){ el.innerHTML="<div style='color:var(--warn)'>error</div>"; }
 }
 async function refreshMachines(){
   try{

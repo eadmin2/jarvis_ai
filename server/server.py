@@ -1044,6 +1044,26 @@ async def summon(request: Request) -> JSONResponse:
 _WORKER_CACHE: dict = {"ts": 0.0, "data": [], "refreshing": False}
 
 
+@app.get("/api/clickup-tasks")
+async def clickup_tasks() -> JSONResponse:
+    """Fetch active tasks from ClickUp MyActiveTasks view."""
+    import urllib.request as _ur
+    try:
+        secret_path = Path.home() / ".hermes/secrets/clickup.env"
+        token = secret_path.read_text().strip().split("=", 1)[1].strip()
+        req = _ur.Request(
+            "https://api.clickup.com/api/v2/view/8cnta2f-5495/task",
+            headers={"Authorization": token, "Content-Type": "application/json"},
+        )
+        with _ur.urlopen(req, timeout=8) as resp:
+            data = json.loads(resp.read())
+        tasks = [{"id": t["id"], "name": t["name"], "status": t["status"]["status"]}
+                 for t in data.get("tasks", [])]
+        return JSONResponse({"tasks": tasks})
+    except Exception as exc:
+        return JSONResponse({"tasks": [], "error": str(exc)}, status_code=500)
+
+
 @app.get("/api/machines")
 async def machines() -> JSONResponse:
     """Local (Mac) stats + configured remote workers.
