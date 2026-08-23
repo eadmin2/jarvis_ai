@@ -281,6 +281,10 @@ footer{
         <button class="btn" id="talkBtn" style="flex:1">ENGAGE VOICE</button>
         <button class="btn danger" id="stopBtn">■ STOP</button>
       </div>
+      <div style="margin-top:8px; display:flex; gap:6px; align-items:center">
+        <button class="btn amber" id="modeBtn" style="flex:1" title="Toggle push-to-talk vs continuous listening">PUSH TO TALK</button>
+      </div>
+      <div class="kv" style="margin-top:4px"><span>VAD sensitivity</span><b><input id="vadSens" type="range" min="1" max="9" step="1" value="4" style="width:90px;vertical-align:middle"></b></div>
     </div>
     <div class="panel"><h2><span>AGENT ACTIVITY</span><span class="num">02</span></h2>
       <div id="activity"><div>— no activity yet —</div></div>
@@ -570,8 +574,10 @@ function playChunk(buf){
   src.start(t); playhead=t+ab.duration;
   activeSources.push(src); src.onended=()=>{activeSources=activeSources.filter(x=>x!==src)};
   audioArrived=true;
+  // mute mic (continuous mode) while this + any queued chunks play, plus a cooldown tail
+  ttsPlayingUntil=Math.max(ttsPlayingUntil,(t+ab.duration-audioCtx.currentTime)*1000+performance.now()+TTS_COOLDOWN_MS);
 }
-function stopPlayback(){ activeSources.forEach(s=>{try{s.stop()}catch{}}); activeSources=[]; playhead=0; }
+function stopPlayback(){ activeSources.forEach(s=>{try{s.stop()}catch{}}); activeSources=[]; playhead=0; ttsPlayingUntil=performance.now()+TTS_COOLDOWN_MS; }
 
 /* ============================== audio in =========================== */
 const workletCode=`
@@ -611,20 +617,126 @@ async function initMic(){
     srcNode=audioCtx.createMediaStreamSource(mediaStream);
     workletNode=new AudioWorkletNode(audioCtx,"pcm16k");
     workletNode.port.onmessage=e=>{
-      if(capturing&&wsReady)ws.send(e.data);
-      // level meter
+      // level meter (always computed so continuous-mode VAD can use it)
       const a=new Int16Array(e.data); let s=0;
       for(let i=0;i<a.length;i+=8)s+=Math.abs(a[i]);
       level=Math.min(1,(s/(a.length/8))/9000);
-      if(capturing)$("levelBar").style.width=(level*100).toFixed(0)+"%";
+      if(continuousMode) vadTick(level,e.data);
+      else{
+        if(capturing&&wsReady)ws.send(e.data);
+        if(capturing)$("levelBar").style.width=(level*100).toFixed(0)+"%";
+      }
     };
     srcNode.connect(workletNode);
   }
   $("micDot").className="dot on"; $("micState").textContent="ready";
 }
 
-/* ============================== talk flow ========================== */
+/* ============================== continuous / VAD mode ============== */
+let continuousMode=(localStorage.getItem("jarvisListenMode")==="continuous");
+let ttsPlayingUntil=0;             // timestamp (ms) until which mic input is suppressed (TTS playback + cooldown)
+const TTS_COOLDOWN_MS=400;         // extra mute time after playback ends, avoids tail-end self-hearing
+let vadSpeaking=false, vadSilenceMs=0, vadSpeechMs=0, vadLastT=0;
+let vadPreRoll=[];                 // ring buffer of recent PCM chunks captured *before* speech is confirmed,
+                                    // so the syllables that triggered VAD aren't lost when 'start' finally fires
+const VAD_PREROLL_CHUNKS=8;        // ~8 * 80ms = 640ms, comfortably covers VAD_MIN_SPEECH_MS + reaction time
+let vadSensitivity=4;              // 1 (very sensitive) .. 9 (needs loud speech), maps to an RMS-ish threshold
+const VAD_HANGOVER_MS=1500;        // silence required to end an utterance / turn.
+                                    // Kept deliberately above a normal breath or
+                                    // mid-sentence "thinking" pause so one turn keeps
+                                    // accumulating through them (while vadSpeaking is
+                                    // true every chunk is streamed regardless of level,
+                                    // so a segment survives internal silence).
+                                    // History, for anyone tempted to raise this again:
+                                    // it was escalated 700 -> 1400 -> 2800ms chasing a
+                                    // fragmentation bug that lived somewhere else
+                                    // entirely -- the barge-in stopPlayback() in vadTick
+                                    // was arming the TTS echo-suppression window against
+                                    // the user's own turn, so the turn was killed ~80ms
+                                    // after it opened and this constant was never even
+                                    // reached. That is fixed; raising this value was
+                                    // treating the symptom and only added dead air.
+const VAD_MIN_SPEECH_MS=200;       // must sustain speech this long before we start recording (avoid clicks/coughs)
+function vadThreshold(){ return 0.03+ (vadSensitivity-1)*0.02; } // 0.03 (sens=1) .. 0.19 (sens=9)
+
+function setMode(mode){
+  continuousMode = mode==="continuous";
+  localStorage.setItem("jarvisListenMode", continuousMode?"continuous":"ptt");
+  $("modeBtn").textContent = continuousMode?"CONTINUOUS LISTENING":"PUSH TO TALK";
+  $("modeBtn").classList.toggle("amber", !continuousMode);
+  vadSpeaking=false; vadSilenceMs=0; vadSpeechMs=0;
+  if(continuousMode){
+    if(capturing){capturing=false; if(wsReady)ws.send(JSON.stringify({type:"stop"}));}
+    $("talkBtn").style.display="none"; $("reactorWrap").title="Continuous listening — just speak";
+    initMic().then(()=>{ $("micState").textContent="listening…"; setState("listening","LISTENING","SPEAK ANYTIME"); }).catch(err=>addMsg("sys","mic blocked: "+err.message));
+  }else{
+    $("talkBtn").style.display=""; $("reactorWrap").title="Click to talk";
+    if(capturing){capturing=false; if(wsReady)ws.send(JSON.stringify({type:"stop"}));}
+    $("micState").textContent="ready"; $("levelBar").style.width="0%";
+    setState("standby","STANDBY");
+  }
+}
+function vadTick(lvl,chunk){
+  const now=performance.now();
+  const dt=vadLastT?Math.min(200,now-vadLastT):80; vadLastT=now;
+  const mutedByTts = now < ttsPlayingUntil;
+  if(mutedByTts){
+    // don't feed mic audio to the server while assistant is speaking (avoid self-trigger / echo)
+    if(vadSpeaking){ // assistant started talking mid-utterance (barge-in edge case) — end our turn quietly
+      vadSpeaking=false; vadSilenceMs=0; vadSpeechMs=0;
+      if(capturing){capturing=false; if(wsReady)ws.send(JSON.stringify({type:"stop"}));}
+    }
+    vadPreRoll=[];  // stale pre-mute audio must not prepend to the next turn
+    $("micState").textContent="muted (tts)"; $("levelBar").style.width="0%";
+    return;
+  }
+  const thresh=vadThreshold();
+  const above=lvl>thresh;
+  if(!vadSpeaking){
+    // keep a rolling pre-roll buffer of raw PCM chunks even while not yet "speaking" — this is the audio
+    // that actually contains the trigger syllables; without it, only silence-adjacent audio after the
+    // VAD_MIN_SPEECH_MS confirmation delay ever reaches the server, so the transcript is empty/garbage.
+    vadPreRoll.push(chunk);
+    if(vadPreRoll.length>VAD_PREROLL_CHUNKS) vadPreRoll.shift();
+    if(above){ vadSpeechMs+=dt; } else { vadSpeechMs=0; }
+    $("micState").textContent="listening…"; $("levelBar").style.width=(lvl*100).toFixed(0)+"%";
+    if(vadSpeechMs>=VAD_MIN_SPEECH_MS){
+      // speech confirmed → open a turn
+      vadSpeaking=true; vadSilenceMs=0;
+      if(!wsReady){vadSpeaking=false;vadSpeechMs=0;vadPreRoll=[];return}
+      // Barge-in: cut off assistant audio, but do NOT inherit stopPlayback()'s
+      // echo-suppression cooldown -- it would mute the very mic we are about to
+      // record from, and the next vadTick would see mutedByTts and instantly end
+      // the turn, so only the pre-roll ever reached the server.
+      stopPlayback(); ttsPlayingUntil=0; audioArrived=false;
+      ws.send(JSON.stringify({type:"start",sample_rate:16000,format:"pcm_s16le",channels:1,conversation:CONV}));
+      capturing=true;
+      // flush the buffered pre-roll so the beginning of the utterance isn't lost
+      for(const c of vadPreRoll) ws.send(c);
+      vadPreRoll=[];
+      $("micState").textContent="LIVE"; setState("listening","LISTENING","AUTO-SEND ON SILENCE");
+    }
+  }else{
+    if(capturing&&wsReady)ws.send(chunk);
+    $("micState").textContent="LIVE"; $("levelBar").style.width=(lvl*100).toFixed(0)+"%";
+    if(above){ vadSilenceMs=0; } else { vadSilenceMs+=dt; }
+    if(vadSilenceMs>=VAD_HANGOVER_MS){
+      // end of speech → auto-send
+      vadSpeaking=false; vadSilenceMs=0; vadSpeechMs=0;
+      capturing=false;
+      if(wsReady)ws.send(JSON.stringify({type:"stop"}));
+      vadPreRoll=[];
+      $("micState").textContent="listening…"; setState("thinking","PROCESSING");
+    }
+  }
+}
+$("vadSens").value=String(vadSensitivity);
+$("vadSens").addEventListener("input",()=>{ vadSensitivity=Number($("vadSens").value); localStorage.setItem("jarvisVadSens",String(vadSensitivity)); });
+{ const saved=localStorage.getItem("jarvisVadSens"); if(saved){vadSensitivity=Number(saved); $("vadSens").value=saved;} }
+
+/* ============================== talk flow (push-to-talk) ============ */
 async function toggleTalk(){
+  if(continuousMode)return; // ring click is a no-op in continuous mode; use the mode toggle to switch back
   if(!wsReady){addMsg("sys","voice server offline");return}
   if(capturing){ // stop talking
     capturing=false;
@@ -645,6 +757,8 @@ $("talkBtn").onclick=toggleTalk;
 $("syncTasksBtn").onclick=syncClickUpTasks;
 $("reactorWrap").onclick=toggleTalk;
 $("stopBtn").onclick=stopRun;
+$("modeBtn").onclick=()=>setMode(continuousMode?"ptt":"continuous");
+setMode(continuousMode?"continuous":"ptt");
 
 /* ---- pop-up viewer ---- */
 const DASH_PROXY=`https://${location.hostname}:9443`;
