@@ -33,6 +33,10 @@ The HUD around the ring is a real control center:
 - **Approval cards** — dangerous commands pause for your ALLOW/DENY
 - **Interrupt-aware barge-in** — cut it off mid-sentence; it knows exactly
   what you heard and what you didn't
+- **Hands-free mode** — switch from push-to-talk to continuous listening and
+  just speak; on-device voice activity detection opens and closes each turn,
+  with an adjustable sensitivity slider and automatic mic muting while the
+  agent is talking so it can't hear itself
 - **Embedded dashboards** — Hermes' kanban board and session browser pop up
   in animated viewers, fully interactive
 - **Holographic media panels** — say *"show me a video of how arc reactors
@@ -44,6 +48,8 @@ The HUD around the ring is a real control center:
 - **Switchable voice engine** — flip between ElevenLabs and a free,
   self-hosted Kokoro TTS engine live from the HUD, no restart needed
 - **Conversation history** — every turn is logged to `logs/conversation_history.jsonl`; open it any time from the VIEWS panel to scroll back through what you and Jarvis said, filterable per conversation
+- **ClickUp active tasks** — pull your current ClickUp task list into a HUD
+  panel on demand, so what you're working on sits next to what the agent is doing
 - **Machines panel** — live CPU/GPU stats for the host and remote workers
 - **Cinematic boot** — press `B`: panels flicker in, ring spins up,
   "Systems online. Good morning."
@@ -124,6 +130,8 @@ evening.
 | Action | How |
 |---|---|
 | Talk | Click the ring (or Space) · speak · click again to send |
+| Hands-free | PUSH TO TALK / CONTINUOUS LISTENING toggle in panel 01 (remembered between visits) |
+| Sync ClickUp | ⟳ SYNC CLICKUP in the ACTIVE TASKS panel |
 | Stop the agent | red ■ STOP button or Esc |
 | Barge in | click the ring while it's speaking |
 | Typed chat | input bar at the bottom (same conversation as voice) |

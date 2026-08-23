@@ -66,6 +66,7 @@ approval_request{data,run_id} · error · done{timing}
 | `/api/usage` | local token/char tally + ElevenLabs quota (needs user_read on the key) |
 | `/api/tts-provider` | `GET` returns the active TTS provider (`elevenlabs`/`kokoro`) and its voice name; `POST {"provider": ...}` switches it in memory (resets to the `server.yaml` default on restart) |
 | `/api/history` | `GET /api/history?limit=100&conversation=NAME` — recent turns (`{ts, iso, conversation, user, jarvis}`) from the append-only `logs/conversation_history.jsonl`, filterable by conversation, used by the HUD history drawer |
+| `/api/clickup-tasks` | fetches the configured ClickUp view and returns `{id, name, status}` per task; the API token is read server-side from `~/.hermes/secrets/clickup.env` and never reaches the browser. Returns an empty list plus an `error` field on failure rather than throwing |
 | `/api/summon` | broadcasts a holographic media panel (`{media, src, title, position}` or `{action:"dismiss"}`) to every connected HUD over its WebSocket — this is what the bundled `hud_display` Hermes plugin calls |
 | port 9443 (separate app) | TLS reverse proxy of the Hermes dashboard with WebSocket bridge and frame-header stripping, so the HTTPS HUD can iframe it |
 
