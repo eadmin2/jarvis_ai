@@ -47,6 +47,10 @@ The HUD around the ring is a real control center:
 - **Usage tracking** — tokens/day, turns, ElevenLabs quota bar
 - **Switchable voice engine** — flip between ElevenLabs and a free,
   self-hosted Kokoro TTS engine live from the HUD, no restart needed
+- **Live model & thinking controls** — pick the Claude model from the HUD and
+  switch it mid-conversation without losing context, and dial reasoning effort
+  between FAST (speech latency) and DEEP (slow, for when you want it to actually
+  think) per task
 - **Conversation history** — every turn is logged to `logs/conversation_history.jsonl`; open it any time from the VIEWS panel to scroll back through what you and Jarvis said, filterable per conversation
 - **ClickUp active tasks** — pull your current ClickUp task list into a HUD
   panel on demand, so what you're working on sits next to what the agent is doing
@@ -132,6 +136,8 @@ evening.
 | Talk | Click the ring (or Space) · speak · click again to send |
 | Hands-free | PUSH TO TALK / CONTINUOUS LISTENING toggle in panel 01 (remembered between visits) |
 | Sync ClickUp | ⟳ SYNC CLICKUP in the ACTIVE TASKS panel |
+| Change model | MODELS LOADOUT panel → Model dropdown (applies to the current session) |
+| Think harder | MODELS LOADOUT panel → Thinking dropdown → DEEP (much slower) |
 | Stop the agent | red ■ STOP button or Esc |
 | Barge in | click the ring while it's speaking |
 | Typed chat | input bar at the bottom (same conversation as voice) |
