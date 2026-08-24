@@ -224,6 +224,14 @@ body.booted header{animation:panelIn .4s backwards}
 #activity div{padding:2px 0; color:var(--txt-dim)}
 #activity div b{color:var(--amber)}
 #skillsList,#jobsList,#activeTasksList{max-height:130px; overflow-y:auto; font-size:12.5px}
+
+/* ---------------- loadout selectors ---------------- */
+.loadoutSel{background:#081523; color:var(--txt); border:1px solid var(--line);
+  font-family:inherit; font-size:12px; padding:1px 4px; max-width:170px}
+.loadoutSel:focus{outline:none; border-color:var(--cyan-dim)}
+#effortWarn{display:none; font-size:10.5px; letter-spacing:1px; color:var(--warn);
+  padding:3px 0 0}
+#effortWarn.on{display:block}
 #toolsetList{max-height:170px; overflow-y:auto; scrollbar-width:thin}
 #skillsList div,#jobsList div,#activeTasksList div{padding:1.5px 0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
 
@@ -329,10 +337,11 @@ footer{
   <!-- RIGHT COLUMN -->
   <div class="col">
     <div class="panel"><h2><span>MODELS LOADOUT</span><span class="num">06</span></h2>
-      <div class="kv"><span>Brain</span><b>hermes-agent</b></div>
+      <div class="kv"><span>Model</span><b><select id="modelSel" class="loadoutSel" title="Locks the current Hermes session to this model"><option>—</option></select></b></div>
+      <div class="kv"><span>Thinking</span><b><select id="effortSel" class="loadoutSel" title="Higher effort is markedly slower; FAST is the right default for speech"></select></b></div>
+      <div id="effortWarn">\u26a0 DEEP MODE \u2014 REPLIES WILL BE SLOW</div>
       <div class="kv"><span>STT</span><b>whisper base.en</b></div>
-      <div class="kv"><span>TTS</span><b>ElevenLabs Flash v2.5</b></div>
-      <div class="kv"><span>Fallback</span><b>claude-haiku-4-5</b></div>
+      <div class="kv"><span>TTS</span><b id="ttsLoadout">—</b></div>
       <div style="border-top:1px solid var(--line); margin:6px 0 4px"></div>
       <div class="kv"><span>Tokens today</span><b id="uTok">—</b></div>
       <div class="kv" id="uCostRow" style="display:none"><span>Est. cost today</span><b id="uCost">—</b></div>
@@ -900,7 +909,57 @@ $("voiceProviderBtn").onclick=async()=>{
   }catch(err){addMsg("sys","voice switch failed: "+err.message);}
   finally{ btn.disabled=false; refreshVoiceProvider(); }
 };
-refreshHealth();refreshSkills();refreshJobs();refreshMachines();refreshUsage();refreshVoiceProvider();
+async function refreshModelLoadout(){
+  try{
+    const r=await fetch("/api/model"); const j=await r.json();
+    const cur=(j.current||{}).model||"";
+    const sel=$("modelSel");
+    if(sel.dataset.filled!=="1"){
+      sel.innerHTML=(j.available||[]).map(m=>`<option value="${m}">${m}</option>`).join("")
+        || "<option>—</option>";
+      sel.dataset.filled="1";
+    }
+    if(cur) sel.value=cur;
+    const es=$("effortSel");
+    if(es.dataset.filled!=="1"){
+      es.innerHTML=(j.effort_choices||[]).map(c=>`<option value="${c.id}" title="${c.hint}">${c.label}</option>`).join("");
+      es.dataset.filled="1";
+    }
+    if(j.effort) es.value=j.effort;
+    $("effortWarn").className = (j.effort==="high") ? "on" : "";
+  }catch{}
+}
+$("modelSel").onchange=async()=>{
+  const sel=$("modelSel"); const want=sel.value; sel.disabled=true;
+  try{
+    const r=await fetch("/api/model",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({model:want,provider:"anthropic"})});
+    const j=await r.json();
+    if(!r.ok){addMsg("sys","model switch failed: "+(j.error||r.status));}
+    else addMsg("sys","model switched to "+((j.current||{}).model||want)+" (this session)");
+  }catch(e){addMsg("sys","model switch failed: "+e.message);}
+  finally{ sel.disabled=false; refreshModelLoadout(); }
+};
+$("effortSel").onchange=async()=>{
+  const es=$("effortSel"); const want=es.value; es.disabled=true;
+  try{
+    const r=await fetch("/api/effort",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({effort:want})});
+    const j=await r.json();
+    if(!r.ok){addMsg("sys","effort change failed: "+(j.error||r.status));}
+    else addMsg("sys","thinking effort: "+want+(want==="high"?" — replies will be slow":""));
+  }catch(e){addMsg("sys","effort change failed: "+e.message);}
+  finally{ es.disabled=false; refreshModelLoadout(); }
+};
+const _origRefreshVoiceProvider = refreshVoiceProvider;
+refreshVoiceProvider = async function(){
+  await _origRefreshVoiceProvider();
+  try{
+    const el=$("ttsLoadout");
+    if(el) el.textContent=$("voiceProviderLabel").textContent||"—";
+  }catch{}
+};
+refreshHealth();refreshSkills();refreshJobs();refreshMachines();refreshUsage();refreshVoiceProvider();refreshModelLoadout();
 setInterval(refreshUsage,60000);
 setInterval(refreshHealth,15000); setInterval(refreshJobs,60000); setInterval(refreshMachines,10000);
 setInterval(refreshSkills,120000);

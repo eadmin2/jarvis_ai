@@ -55,6 +55,14 @@ USAGE_PATH = ROOT / "logs" / "usage_stats.json"
 HISTORY_PATH = ROOT / "logs" / "conversation_history.jsonl"
 _USAGE_LOCK = threading.Lock()
 
+# Runtime reasoning-effort override set from the HUD. In-memory only: a restart
+# always returns to the server.yaml default, so a forgotten "deep" setting can
+# never silently persist across a reboot.
+EFFORT_OVERRIDE: dict = {"value": None}
+
+# Model ids Hermes knows the configured credential can reach.
+HERMES_MODELS_CACHE = Path.home() / ".hermes" / "provider_models_cache.json"
+
 
 def _today() -> str:
     return time.strftime("%Y-%m-%d")
@@ -224,6 +232,30 @@ class HermesAPI:
         print(f"Created Hermes session '{name}' -> {sid}", flush=True)
         return sid
 
+    def get_session_model(self, session_id: str) -> dict:
+        """Current model/provider actually pinned on a session."""
+        r = requests.get(f"{self.base}/api/sessions/{session_id}",
+                         headers=self.headers(), timeout=15)
+        r.raise_for_status()
+        s = (r.json() or {}).get("session") or {}
+        return {"model": s.get("model") or "", "provider": s.get("billing_provider") or ""}
+
+    def set_session_model(self, session_id: str, model: str, provider: str) -> dict:
+        """Lock a session to a model.
+
+        Hermes resolves a turn's model as: lock > session-persisted > per-request.
+        A plain per-request ``model`` is therefore IGNORED once a session has one,
+        so switching mid-conversation must go through this lock endpoint. There is
+        no "clear" operation (an empty model returns 400) -- reverting means
+        locking explicitly back to the configured default.
+        """
+        r = requests.post(f"{self.base}/api/sessions/{session_id}/model",
+                          headers=self.headers(),
+                          json={"model": model, "provider": provider}, timeout=30)
+        if r.status_code >= 400:
+            raise RuntimeError(f"Hermes model lock HTTP {r.status_code}: {r.text[:300]}")
+        return r.json()
+
     def stop_run(self, run_id: str) -> dict:
         r = requests.post(f"{self.base}/v1/runs/{run_id}/stop", headers=self.headers(), timeout=15)
         return {"status_code": r.status_code, "body": r.text[:300]}
@@ -233,13 +265,27 @@ class HermesAPI:
                           json=body, timeout=15)
         return {"status_code": r.status_code, "body": r.text[:300]}
 
+    def _effective_model_options(self) -> dict:
+        """Config model_options, with a runtime reasoning-effort override applied.
+
+        The HUD can raise effort temporarily (see POST /api/effort). Measured on
+        this deployment: effort "minimal" answered a multi-step puzzle in 2.6s and
+        got it wrong; "high" took 36s and got it right. Low effort is the right
+        default for speech -- the override exists for the occasional question
+        where correctness matters more than latency.
+        """
+        opts = dict(self.cfg.get("model_options") or {"reasoning_effort": "minimal"})
+        if EFFORT_OVERRIDE.get("value"):
+            opts["reasoning_effort"] = EFFORT_OVERRIDE["value"]
+        return opts
+
     def chat_stream_events(self, session_id: str, input_text: str, timeout: float) -> Iterator[tuple[str, str]]:
         """Yield ("run"|"text"|"tool"|"approval"|"final", value) from a session turn."""
         payload = {
             "message": input_text,
             "instructions": self.cfg.get("instructions") or "",
             # Voice turns should optimize for low latency over deep reasoning.
-            "model_options": self.cfg.get("model_options") or {"reasoning_effort": "minimal"},
+            "model_options": self._effective_model_options(),
         }
         if self.cfg.get("model"):
             payload["model"] = self.cfg["model"]
@@ -988,6 +1034,98 @@ async def usage() -> JSONResponse:
 
 
 WS_CLIENTS: set = set()
+
+
+# Only offer models on the provider the voice path is actually authenticated for.
+# The cache also lists an openai-api section, but that credential is separate
+# (and currently rate-limit exhausted); offering those here would hand the user a
+# one-click way to break Jarvis exactly the way the ox-alpha switch did.
+MODEL_PROVIDER = "anthropic"
+
+
+def _available_models() -> list[str]:
+    """Model ids from Hermes' own provider cache, restricted to MODEL_PROVIDER."""
+    try:
+        data = json.loads(HERMES_MODELS_CACHE.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    entry = (data or {}).get(MODEL_PROVIDER)
+    out: list[str] = []
+    if isinstance(entry, dict):
+        for m in entry.get("models") or []:
+            if isinstance(m, str):
+                out.append(m)
+    # Current-generation first, dated snapshots after; stable and de-duplicated.
+    seen, ordered = set(), []
+    for m in sorted(out):
+        if m not in seen:
+            seen.add(m)
+            ordered.append(m)
+    return sorted(ordered, key=lambda m: (any(ch.isdigit() for ch in m.split("-")[-1])
+                                          and len(m.split("-")[-1]) == 8, m))
+
+
+EFFORT_CHOICES = [
+    {"id": "minimal", "label": "FAST", "hint": "default \u2014 speech latency"},
+    {"id": "medium", "label": "BALANCED", "hint": "slower, more careful"},
+    {"id": "high", "label": "DEEP", "hint": "much slower \u2014 for analysis"},
+]
+
+
+@app.get("/api/model")
+async def get_model() -> JSONResponse:
+    """Live model pinned on the current session + the effort override."""
+    conversation = (CFG.get("hermes") or {}).get("conversation", "jarvis-main")
+    current = {"model": "", "provider": ""}
+    try:
+        sid = HERMES.get_session_id(conversation)
+        current = await asyncio.to_thread(HERMES.get_session_model, sid)
+    except Exception as exc:
+        current = {"model": "", "provider": "", "error": str(exc)[:200]}
+    return JSONResponse({
+        "current": current,
+        "available": _available_models(),
+        "effort": EFFORT_OVERRIDE.get("value") or
+                  ((CFG.get("hermes") or {}).get("model_options") or {}).get("reasoning_effort", "minimal"),
+        "effort_choices": EFFORT_CHOICES,
+        "effort_overridden": bool(EFFORT_OVERRIDE.get("value")),
+    })
+
+
+@app.post("/api/model")
+async def set_model(request: Request) -> JSONResponse:
+    """Lock the live session to a model. Reverting = pick the default again."""
+    body = await request.json()
+    model = (body.get("model") or "").strip()
+    provider = (body.get("provider") or MODEL_PROVIDER).strip()
+    if not model:
+        return JSONResponse({"error": "model is required"}, status_code=400)
+    if model not in _available_models():
+        return JSONResponse({"error": f"unknown model '{model}'"}, status_code=400)
+    conversation = (CFG.get("hermes") or {}).get("conversation", "jarvis-main")
+    try:
+        sid = HERMES.get_session_id(conversation)
+        await asyncio.to_thread(HERMES.set_session_model, sid, model, provider)
+        current = await asyncio.to_thread(HERMES.get_session_model, sid)
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)[:300]}, status_code=502)
+    return JSONResponse({"current": current, "session_id": sid})
+
+
+@app.post("/api/effort")
+async def set_effort(request: Request) -> JSONResponse:
+    """Set (or clear) the runtime reasoning-effort override. In-memory only."""
+    body = await request.json()
+    effort = (body.get("effort") or "").strip()
+    valid = {c["id"] for c in EFFORT_CHOICES}
+    if effort and effort not in valid:
+        return JSONResponse({"error": f"effort must be one of {sorted(valid)}"}, status_code=400)
+    EFFORT_OVERRIDE["value"] = effort or None
+    return JSONResponse({
+        "effort": effort or ((CFG.get("hermes") or {}).get("model_options") or {}).get("reasoning_effort", "minimal"),
+        "effort_overridden": bool(effort),
+    })
+
 
 
 @app.get("/api/tts-provider")
