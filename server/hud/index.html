@@ -65,14 +65,17 @@ header .sub{font-size:12px; letter-spacing:3px; color:var(--txt-dim)}
   width:100%; max-width:680px; flex:1; overflow-y:auto; margin-top:4px; padding:0 10px;
   display:flex; flex-direction:column; gap:6px; scrollbar-width:thin;
 }
-.msg{font-size:14.5px; line-height:1.35; padding:7px 11px; border:1px solid var(--line); background:#08152399; max-width:88%}
+.msg{font-size:14.5px; line-height:1.35; padding:7px 11px; border:1px solid var(--line); background:#08152399; max-width:88%; white-space:pre-wrap; overflow-wrap:anywhere}
 .msg.you{align-self:flex-end; border-color:#205a6e; color:#cfeefb}
 .msg.jarvis{align-self:flex-start; border-left:2px solid var(--cyan)}
 .msg.sys{align-self:center; color:var(--txt-dim); font-size:12px; border:none; background:none; padding:2px}
-#chatRow{display:flex; gap:8px; width:100%; max-width:680px; padding:8px 10px}
+#chatRow{display:flex; gap:8px; width:100%; max-width:680px; padding:8px 10px; align-items:flex-end}
 #chatInput{
   flex:1; background:#06101c; border:1px solid var(--line); color:#cfeefb; padding:9px 12px;
   font-family:'Rajdhani'; font-size:15px; outline:none;
+  /* textarea: starts one line tall, grows with content, then scrolls */
+  resize:none; line-height:1.35; min-height:38px; max-height:132px; overflow-y:auto;
+  display:block;
 }
 #chatInput:focus{border-color:var(--cyan-dim); box-shadow:0 0 8px #00e5ff33}
 button.btn{
@@ -328,7 +331,7 @@ footer{
     </div>
     <div id="feed"></div>
     <div id="chatRow">
-      <input id="chatInput" placeholder="Type to Hermes… (/new resets · voice: click the ring)" autocomplete="off">
+      <textarea id="chatInput" rows="1" autocomplete="off" placeholder="Type to Hermes… (Enter sends · Shift+Enter new line · /new resets)"></textarea>
       <button class="btn" id="sendBtn">SEND</button>
       <button class="btn" id="clearBtn" title="Clear the visible chat (history stays in Hermes)">CLR</button>
     </div>
@@ -819,7 +822,7 @@ addEventListener("keydown",e=>{
 /* ============================== typed chat ========================= */
 async function sendChat(){
   const inp=$("chatInput"); const text=inp.value.trim(); if(!text)return;
-  inp.value=""; addMsg("you",text); setState("thinking","PROCESSING");
+  inp.value=""; autoGrowChat(); addMsg("you",text); setState("thinking","PROCESSING");
   try{
     const r=await fetch("/api/chat",{method:"POST",headers:{"Content-Type":"application/json"},
       body:JSON.stringify({input:text,conversation:CONV})});
@@ -835,7 +838,16 @@ async function sendChat(){
 }
 $("sendBtn").onclick=sendChat;
 $("clearBtn").onclick=()=>{feed.innerHTML="";addMsg("sys","chat cleared (history stays in Hermes — type /new to reset the conversation)");};
-$("chatInput").addEventListener("keydown",e=>{if(e.key==="Enter")sendChat()});
+function autoGrowChat(){
+  const el=$("chatInput");
+  el.style.height="auto";                       // shrink first so it can also get smaller
+  el.style.height=Math.min(el.scrollHeight,132)+"px";
+}
+$("chatInput").addEventListener("keydown",e=>{
+  // Enter sends; Shift+Enter (and IME composition) insert a newline instead.
+  if(e.key==="Enter"&&!e.shiftKey&&!e.isComposing){ e.preventDefault(); sendChat(); }
+});
+$("chatInput").addEventListener("input",autoGrowChat);
 
 /* ============================== widgets ============================ */
 async function jget(path){const r=await fetch("/api/hermes"+path);if(!r.ok)throw new Error(r.status);return r.json()}
