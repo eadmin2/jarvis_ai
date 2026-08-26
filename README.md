@@ -51,9 +51,14 @@ The HUD around the ring is a real control center:
   switch it mid-conversation without losing context, and dial reasoning effort
   between FAST (speech latency) and DEEP (slow, for when you want it to actually
   think) per task
+- **Multi-line chat with images** — Shift+Enter for a new line, and a paperclip
+  button to send screenshots or photos straight to the model (camera and library
+  on iPhone/iPad); images are downscaled in the browser before they're sent
 - **Conversation history** — every turn is logged to `logs/conversation_history.jsonl`; open it any time from the VIEWS panel to scroll back through what you and Jarvis said, filterable per conversation
-- **ClickUp active tasks** — pull your current ClickUp task list into a HUD
-  panel on demand, so what you're working on sits next to what the agent is doing
+- **OmniFocus next actions** — pull the tasks you've tagged `next` into a HUD
+  panel on demand, so what you're working on sits next to what the agent is doing.
+  Reached through LMCP on your Mac, and cached so a sleeping laptop shows the last
+  known list rather than an empty panel (the ClickUp source is still available too)
 - **Machines panel** — live CPU/GPU stats for the host and remote workers
 - **Cinematic boot** — press `B`: panels flicker in, ring spins up,
   "Systems online. Good morning."
@@ -135,7 +140,9 @@ evening.
 |---|---|
 | Talk | Click the ring (or Space) · speak · click again to send |
 | Hands-free | PUSH TO TALK / CONTINUOUS LISTENING toggle in panel 01 (remembered between visits) |
-| Sync ClickUp | ⟳ SYNC CLICKUP in the ACTIVE TASKS panel |
+| Sync tasks | ⟳ SYNC OMNIFOCUS in the ACTIVE TASKS panel (tasks tagged `next`) |
+| New line in chat | Shift+Enter (Enter sends) |
+| Attach an image | 📎 beside the chat input · max 4 per message |
 | Change model | MODELS LOADOUT panel → Model dropdown (applies to the current session) |
 | Think harder | MODELS LOADOUT panel → Thinking dropdown → DEEP (much slower) |
 | Stop the agent | red ■ STOP button or Esc |
