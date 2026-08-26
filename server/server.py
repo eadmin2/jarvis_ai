@@ -1257,6 +1257,112 @@ async def summon(request: Request) -> JSONResponse:
 _WORKER_CACHE: dict = {"ts": 0.0, "data": [], "refreshing": False}
 
 
+# --------------------------------------------------------------- OmniFocus
+# OmniFocus is a Mac app with no cloud API, so unlike ClickUp the VPS cannot
+# query it directly. Hermes reaches it (see the `omnifocus` skill) by running
+# osascript on the Mac through LMCP's run_terminal_command; this endpoint drives
+# the same relay itself, so the panel needs no agent turn.
+#
+# Two things bite here and are easy to lose:
+#   * Cloudflare in front of the relay rejects unknown clients with error 1010
+#     ("browser_signature_banned"). A browser User-Agent is REQUIRED or every
+#     call 403s with no useful message.
+#   * The LMCP omnifocus_* tools falsely report "requires OmniFocus Pro"
+#     (LMCP bug FB-66FA8F). AppleScript works fine, which is why this shells out.
+#
+# The Mac is a laptop and sleeps, so a failed refresh is normal rather than
+# exceptional: the last good list is cached and returned marked stale.
+LMCP_UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+           "(KHTML, like Gecko) Chrome/126.0 Safari/537.36")
+OMNIFOCUS_TAG = "next"
+
+# Names are joined with linefeed rather than the default comma: task names
+# contain commas and parentheses, so a comma split would mangle them.
+OMNIFOCUS_SCRIPT = [
+    "set text item delimiters to linefeed",
+    ('tell application "OmniFocus" to tell default document to set nm to '
+     "name of every flattened task whose completed is false "
+     f'and (name of its tags) contains "{OMNIFOCUS_TAG}"'),
+    "return nm as text",
+]
+
+_OMNIFOCUS_CACHE: dict = {"tasks": [], "at": 0.0}
+
+
+def _lmcp_url() -> str:
+    """Relay URL (with token) from Hermes' config. Never log this value."""
+    cfg_text = (Path.home() / ".hermes" / "config.yaml").read_text(encoding="utf-8")
+    m = re.search(r"url:\s*(https://\S*local-mcp\S*)", cfg_text)
+    if not m:
+        raise RuntimeError("local-mcp url not found in ~/.hermes/config.yaml")
+    return m.group(1).strip().strip('"').strip("'")
+
+
+def _lmcp_run(command: str, timeout: float = 25.0) -> str:
+    """Run a shell command on the Mac via LMCP; return stdout."""
+    url = _lmcp_url()
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream",
+        "User-Agent": LMCP_UA,      # required: Cloudflare 1010 without it
+    }
+    r = requests.post(url, headers=headers, timeout=timeout, json={
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": {"protocolVersion": "2025-06-18", "capabilities": {},
+                   "clientInfo": {"name": "jarvis-hud", "version": "1.0"}},
+    })
+    if r.status_code >= 400:
+        raise RuntimeError(f"LMCP initialize HTTP {r.status_code}")
+    sid = r.headers.get("Mcp-Session-Id") or r.headers.get("mcp-session-id")
+    if sid:
+        headers["Mcp-Session-Id"] = sid
+    requests.post(url, headers=headers, timeout=timeout,
+                  json={"jsonrpc": "2.0", "method": "notifications/initialized"})
+
+    r = requests.post(url, headers=headers, timeout=timeout, json={
+        "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+        "params": {"name": "run_terminal_command",
+                   # confirm:true runs it outright; without it the tool only previews.
+                   "arguments": {"command": command, "confirm": True}},
+    })
+    if r.status_code >= 400:
+        raise RuntimeError(f"LMCP tools/call HTTP {r.status_code}")
+
+    text = ""
+    for part in ((r.json().get("result") or {}).get("content") or []):
+        if part.get("type") == "text":
+            text += part.get("text") or ""
+    # The payload is wrapped in an untrusted-content banner; the tool's own JSON
+    # result is the first object in it.
+    start = text.find("{")
+    if start < 0:
+        raise RuntimeError("no JSON payload in LMCP response")
+    payload, _ = json.JSONDecoder().raw_decode(text[start:])
+    if payload.get("exit_code") not in (0, None):
+        raise RuntimeError(f"command exit {payload.get('exit_code')}")
+    return payload.get("output") or ""
+
+
+@app.get("/api/omnifocus-tasks")
+async def omnifocus_tasks() -> JSONResponse:
+    """Incomplete OmniFocus tasks tagged `next`, via the Mac over LMCP."""
+    cmd = "osascript " + " ".join("-e " + json.dumps(line) for line in OMNIFOCUS_SCRIPT)
+    try:
+        out = await asyncio.to_thread(_lmcp_run, cmd)
+    except Exception as exc:
+        # Mac asleep / relay down: serve the last good list rather than blanking.
+        return JSONResponse({
+            "tasks": _OMNIFOCUS_CACHE["tasks"],
+            "stale": bool(_OMNIFOCUS_CACHE["tasks"]),
+            "cached_at": _OMNIFOCUS_CACHE["at"],
+            "error": str(exc)[:200],
+        }, status_code=200 if _OMNIFOCUS_CACHE["tasks"] else 503)
+
+    tasks = [{"name": n.strip()} for n in out.splitlines() if n.strip()]
+    _OMNIFOCUS_CACHE.update(tasks=tasks, at=time.time())
+    return JSONResponse({"tasks": tasks, "stale": False, "cached_at": _OMNIFOCUS_CACHE["at"]})
+
+
 @app.get("/api/clickup-tasks")
 async def clickup_tasks() -> JSONResponse:
     """Fetch active tasks from ClickUp MyActiveTasks view."""

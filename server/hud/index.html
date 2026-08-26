@@ -380,7 +380,7 @@ footer{
       <div id="jobsList"><div>—</div></div>
     </div>
     <div class="panel"><h2><span>ACTIVE TASKS</span><span class="num">11</span></h2>
-      <button class="btn" id="syncTasksBtn" style="width:100%;margin-bottom:6px">⟳ SYNC CLICKUP</button>
+      <button class="btn" id="syncTasksBtn" style="width:100%;margin-bottom:6px">⟳ SYNC OMNIFOCUS</button>
       <div id="activeTasksList"><div style="color:var(--txt-dim)">— press sync —</div></div>
     </div>
   </div>
@@ -800,7 +800,7 @@ async function toggleTalk(){
   setState("listening","LISTENING","CLICK AGAIN TO SEND");
 }
 $("talkBtn").onclick=toggleTalk;
-$("syncTasksBtn").onclick=syncClickUpTasks;
+$("syncTasksBtn").onclick=syncOmniFocusTasks;
 $("reactorWrap").onclick=toggleTalk;
 $("stopBtn").onclick=stopRun;
 $("modeBtn").onclick=()=>setMode(continuousMode?"ptt":"continuous");
@@ -952,16 +952,29 @@ async function refreshJobs(){
       :"<div>— none —</div>";
   }catch{ $("jobsList").innerHTML="<div>—</div>"; }
 }
-async function syncClickUpTasks(){
+async function syncOmniFocusTasks(){
   const el=$("activeTasksList");
   const esc=s=>String(s||"").replace(/[<>&]/g,c=>({"<":"&lt;",">":"&gt;","&":"&amp;"}[c]));
   el.innerHTML="<div style='color:var(--txt-dim)'>syncing…</div>";
   try{
-    const r=await fetch("/api/clickup-tasks"); const j=await r.json();
+    const r=await fetch("/api/omnifocus-tasks"); const j=await r.json();
     const tasks=j.tasks||[];
-    el.innerHTML=tasks.length
-      ? tasks.map(t=>`<div>▸ ${esc(t.name)}</div>`).join("")
-      : "<div>— no active tasks —</div>";
+    if(!tasks.length){
+      // 503 + no cache means the Mac has never answered since boot.
+      el.innerHTML=j.error
+        ? "<div style='color:var(--warn)'>mac unreachable</div>"
+        : "<div>— nothing tagged next —</div>";
+      return;
+    }
+    let html=tasks.map(t=>`<div>▸ ${esc(t.name)}</div>`).join("");
+    if(j.stale){
+      // OmniFocus lives on the laptop; asleep is normal, so show the last known
+      // list and say plainly that it is old rather than blanking the panel.
+      const mins=j.cached_at?Math.round((Date.now()/1000-j.cached_at)/60):0;
+      html+=`<div style="color:var(--warn);font-size:10.5px;letter-spacing:1px;padding-top:3px">`+
+            `⚠ CACHED${mins?` · ${mins}m OLD`:""} · MAC ASLEEP</div>`;
+    }
+    el.innerHTML=html;
   }catch(e){ el.innerHTML="<div style='color:var(--warn)'>error</div>"; }
 }
 async function refreshMachines(){
