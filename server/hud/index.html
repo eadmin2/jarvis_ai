@@ -65,14 +65,25 @@ header .sub{font-size:12px; letter-spacing:3px; color:var(--txt-dim)}
   width:100%; max-width:680px; flex:1; overflow-y:auto; margin-top:4px; padding:0 10px;
   display:flex; flex-direction:column; gap:6px; scrollbar-width:thin;
 }
-.msg{font-size:14.5px; line-height:1.35; padding:7px 11px; border:1px solid var(--line); background:#08152399; max-width:88%}
+.msg{font-size:14.5px; line-height:1.35; padding:7px 11px; border:1px solid var(--line); background:#08152399; max-width:88%; white-space:pre-wrap; overflow-wrap:anywhere}
 .msg.you{align-self:flex-end; border-color:#205a6e; color:#cfeefb}
 .msg.jarvis{align-self:flex-start; border-left:2px solid var(--cyan)}
 .msg.sys{align-self:center; color:var(--txt-dim); font-size:12px; border:none; background:none; padding:2px}
-#chatRow{display:flex; gap:8px; width:100%; max-width:680px; padding:8px 10px}
+#chatRow{display:flex; gap:8px; width:100%; max-width:680px; padding:8px 10px; align-items:flex-end}
+#attachRow{display:none; flex-wrap:wrap; gap:6px; width:100%; max-width:680px; padding:0 10px 4px}
+#attachRow.on{display:flex}
+.chip{display:flex; align-items:center; gap:6px; background:#08152399; border:1px solid var(--line);
+  padding:3px 6px; font-size:11.5px; color:var(--txt-dim); max-width:220px}
+.chip img{width:26px; height:26px; object-fit:cover; border:1px solid var(--line)}
+.chip span{overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+.chip b{cursor:pointer; color:var(--warn); font-size:13px; padding:0 2px}
+#attachBtn{padding:9px 11px; font-size:14px; line-height:1}
 #chatInput{
   flex:1; background:#06101c; border:1px solid var(--line); color:#cfeefb; padding:9px 12px;
   font-family:'Rajdhani'; font-size:15px; outline:none;
+  /* textarea: starts one line tall, grows with content, then scrolls */
+  resize:none; line-height:1.35; min-height:38px; max-height:132px; overflow-y:auto;
+  display:block;
 }
 #chatInput:focus{border-color:var(--cyan-dim); box-shadow:0 0 8px #00e5ff33}
 button.btn{
@@ -223,9 +234,32 @@ body.booted header{animation:panelIn .4s backwards}
 #activity{max-height:150px; overflow-y:auto; font-size:12.5px}
 #activity div{padding:2px 0; color:var(--txt-dim)}
 #activity div b{color:var(--amber)}
-#skillsList,#jobsList{max-height:130px; overflow-y:auto; font-size:12.5px}
+#skillsList,#jobsList,#activeTasksList{max-height:130px; overflow-y:auto; font-size:12.5px}
+
+/* ---------------- loadout selectors ---------------- */
+.loadoutSel{background:#081523; color:var(--txt); border:1px solid var(--line);
+  font-family:inherit; font-size:12px; padding:1px 4px; max-width:170px}
+.loadoutSel:focus{outline:none; border-color:var(--cyan-dim)}
+#effortWarn{display:none; font-size:10.5px; letter-spacing:1px; color:var(--warn);
+  padding:3px 0 0}
+#effortWarn.on{display:block}
 #toolsetList{max-height:170px; overflow-y:auto; scrollbar-width:thin}
-#skillsList div,#jobsList div{padding:1.5px 0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+#skillsList div,#jobsList div,#activeTasksList div{padding:1.5px 0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+
+/* ---------------- history drawer ---------------- */
+#historyDrawer{position:fixed; inset:0; z-index:50; display:none; align-items:flex-start; justify-content:flex-end; background:#02060cd9; backdrop-filter:blur(4px)}
+#historyDrawer.open{display:flex}
+#historyBox{width:min(680px,96vw); height:100vh; background:#050b14; border-left:1px solid var(--cyan-dim);
+  box-shadow:-4px 0 40px #00e5ff22; display:flex; flex-direction:column; animation:slideIn .3s ease}
+@keyframes slideIn{from{transform:translateX(100%)}to{transform:none}}
+#historyBar{display:flex; align-items:center; justify-content:space-between; height:44px; padding:0 16px;
+  border-bottom:1px solid var(--line); background:#081523; flex-shrink:0}
+#historyBar h3{font-family:'Orbitron'; font-size:12px; letter-spacing:4px; color:var(--cyan); text-shadow:0 0 10px #00e5ff66}
+#historyList{flex:1; overflow-y:auto; padding:10px 14px; display:flex; flex-direction:column; gap:10px; scrollbar-width:thin}
+.hturn{border:1px solid var(--line); background:#08152399; padding:8px 12px}
+.hturn .hts{font-size:10px; color:var(--txt-dim); letter-spacing:1px; margin-bottom:5px}
+.hturn .hu{font-size:13.5px; color:#cfeefb; padding:4px 8px; border-left:2px solid #205a6e; margin-bottom:5px}
+.hturn .hj{font-size:13.5px; color:var(--txt); padding:4px 8px; border-left:2px solid var(--cyan)}
 footer{
   grid-column:1/4; display:flex; align-items:center; justify-content:space-between;
   font-size:11px; letter-spacing:2px; color:var(--txt-dim); padding:0 14px;
@@ -266,6 +300,10 @@ footer{
         <button class="btn" id="talkBtn" style="flex:1">ENGAGE VOICE</button>
         <button class="btn danger" id="stopBtn">■ STOP</button>
       </div>
+      <div style="margin-top:8px; display:flex; gap:6px; align-items:center">
+        <button class="btn amber" id="modeBtn" style="flex:1" title="Toggle push-to-talk vs continuous listening">PUSH TO TALK</button>
+      </div>
+      <div class="kv" style="margin-top:4px"><span>VAD sensitivity</span><b><input id="vadSens" type="range" min="1" max="9" step="1" value="4" style="width:90px;vertical-align:middle"></b></div>
     </div>
     <div class="panel"><h2><span>AGENT ACTIVITY</span><span class="num">02</span></h2>
       <div id="activity"><div>— no activity yet —</div></div>
@@ -280,12 +318,15 @@ footer{
       <button class="btn viewBtn" onclick="openView('KANBAN','/kanban')">▸ KANBAN BOARD</button>
       <button class="btn viewBtn" onclick="openView('HERMES DASHBOARD','/')">▸ HERMES DASHBOARD</button>
       <button class="btn viewBtn" onclick="openView('CHAT','/chat')">▸ DASHBOARD CHAT</button>
+      <button class="btn viewBtn" onclick="openHistory()">▸ CONVERSATION HISTORY</button>
     </div>
     <div class="panel"><h2><span>SESSION</span><span class="num">05</span></h2>
       <div class="kv"><span>Conversation</span><b>jarvis-main</b></div>
       <div class="kv"><span>Memory scope</span><b>jarvis:user:main</b></div>
       <div class="kv"><span>Active sessions</span><b id="hSessions">—</b></div>
       <div class="kv"><span>Running agents</span><b id="hAgents">—</b></div>
+      <div class="kv"><span>Voice engine</span><b id="voiceProviderLabel">—</b></div>
+      <button class="btn" id="voiceProviderBtn" style="width:100%;margin-top:6px" title="Switch between ElevenLabs and self-hosted Kokoro TTS">SWITCH VOICE ENGINE</button>
     </div>
   </div>
 
@@ -297,8 +338,11 @@ footer{
       <div id="coreState"><div class="st" id="stateLabel">STANDBY</div><div class="hint" id="stateHint">CLICK RING OR SPACE TO TALK</div></div>
     </div>
     <div id="feed"></div>
+    <div id="attachRow"></div>
     <div id="chatRow">
-      <input id="chatInput" placeholder="Type to Hermes… (/new resets · voice: click the ring)" autocomplete="off">
+      <button class="btn" id="attachBtn" title="Attach images (max 4)">&#128206;</button>
+      <input type="file" id="fileInput" accept="image/*" multiple style="display:none">
+      <textarea id="chatInput" rows="1" autocomplete="off" placeholder="Type to Hermes… (Enter sends · Shift+Enter new line · /new resets)"></textarea>
       <button class="btn" id="sendBtn">SEND</button>
       <button class="btn" id="clearBtn" title="Clear the visible chat (history stays in Hermes)">CLR</button>
     </div>
@@ -307,10 +351,11 @@ footer{
   <!-- RIGHT COLUMN -->
   <div class="col">
     <div class="panel"><h2><span>MODELS LOADOUT</span><span class="num">06</span></h2>
-      <div class="kv"><span>Brain</span><b>hermes-agent</b></div>
+      <div class="kv"><span>Model</span><b><select id="modelSel" class="loadoutSel" title="Locks the current Hermes session to this model"><option>—</option></select></b></div>
+      <div class="kv"><span>Thinking</span><b><select id="effortSel" class="loadoutSel" title="Higher effort is markedly slower; FAST is the right default for speech"></select></b></div>
+      <div id="effortWarn">\u26a0 DEEP MODE \u2014 REPLIES WILL BE SLOW</div>
       <div class="kv"><span>STT</span><b>whisper base.en</b></div>
-      <div class="kv"><span>TTS</span><b>ElevenLabs Flash v2.5</b></div>
-      <div class="kv"><span>Fallback</span><b>claude-haiku-4-5</b></div>
+      <div class="kv"><span>TTS</span><b id="ttsLoadout">—</b></div>
       <div style="border-top:1px solid var(--line); margin:6px 0 4px"></div>
       <div class="kv"><span>Tokens today</span><b id="uTok">—</b></div>
       <div class="kv" id="uCostRow" style="display:none"><span>Est. cost today</span><b id="uCost">—</b></div>
@@ -334,6 +379,10 @@ footer{
     <div class="panel"><h2><span>AUTOMATIONS</span><span class="num">10</span></h2>
       <div id="jobsList"><div>—</div></div>
     </div>
+    <div class="panel"><h2><span>ACTIVE TASKS</span><span class="num">11</span></h2>
+      <button class="btn" id="syncTasksBtn" style="width:100%;margin-bottom:6px">⟳ SYNC OMNIFOCUS</button>
+      <div id="activeTasksList"><div style="color:var(--txt-dim)">— press sync —</div></div>
+    </div>
   </div>
 
   <div id="holoStage"></div>
@@ -356,6 +405,16 @@ footer{
     <span id="footMsg">READY</span>
     <span>NOUS HERMES AGENT v0.16</span>
   </footer>
+</div>
+
+<div id="historyDrawer">
+  <div id="historyBox">
+    <div id="historyBar">
+      <h3>CONVERSATION HISTORY</h3>
+      <button class="btn danger" id="historyClose">✕ CLOSE</button>
+    </div>
+    <div id="historyList"><div class="msg sys">Loading…</div></div>
+  </div>
 </div>
 
 <script>
@@ -516,6 +575,24 @@ function connect(){
 connect();
 
 /* ============================== audio out ========================== */
+/* Jitter buffer for the self-hosted TTS path.
+
+   Measured on this deployment over 25 long Kokoro replies vs 371 ElevenLabs ones:
+   ElevenLabs produces audio in 0.63x the time it takes to speak it, so it runs
+   ~37% ahead and silently absorbs any upstream pause. Kokoro runs at 1.09x -- no
+   reserve at all -- and its median time-to-first-byte is 1.74s vs ElevenLabs'
+   0.17s. So when generation stalls mid-reply (usually a tool call: 70% of
+   tool-using turns fall behind realtime, vs 40% without), Kokoro drains the
+   buffer and takes ~1.7s to make sound again. Long replies hit several such
+   stalls, which is heard as chopped, halting speech.
+
+   Fix: when starting from a drained playhead, schedule the first chunk further
+   ahead so there is a cushion to ride through stalls. Applied ONLY when Kokoro
+   is the active engine -- ElevenLabs already has margin and must not be slowed. */
+const JITTER_LEAD_S = 1.8;     // cushion for Kokoro; tune down if replies feel sluggish
+const MIN_LEAD_S = 0.06;       // original behaviour, kept for ElevenLabs
+let ttsIsKokoro = false;       // set from /api/tts-provider by refreshVoiceProvider()
+
 function ensureCtx(){
   if(!audioCtx){
     try{ audioCtx=new (window.AudioContext||window.webkitAudioContext)({sampleRate:16000}); }
@@ -534,12 +611,19 @@ function playChunk(buf){
   for(let i=0;i<i16.length;i++)f32[i]=i16[i]/32768;
   const ab=audioCtx.createBuffer(1,f32.length,16000); ab.copyToChannel(f32,0);
   const src=audioCtx.createBufferSource(); src.buffer=ab; src.connect(audioCtx.destination);
-  const t=Math.max(audioCtx.currentTime+0.06,playhead);
+  // Drained playhead means we are starting (or recovering from a stall): take the
+  // cushion. Mid-stream chunks still stack tightly so nothing is added to latency
+  // once audio is already flowing.
+  const drained = playhead <= audioCtx.currentTime;
+  const lead = (drained && ttsIsKokoro) ? JITTER_LEAD_S : MIN_LEAD_S;
+  const t=Math.max(audioCtx.currentTime+lead,playhead);
   src.start(t); playhead=t+ab.duration;
   activeSources.push(src); src.onended=()=>{activeSources=activeSources.filter(x=>x!==src)};
   audioArrived=true;
+  // mute mic (continuous mode) while this + any queued chunks play, plus a cooldown tail
+  ttsPlayingUntil=Math.max(ttsPlayingUntil,(t+ab.duration-audioCtx.currentTime)*1000+performance.now()+TTS_COOLDOWN_MS);
 }
-function stopPlayback(){ activeSources.forEach(s=>{try{s.stop()}catch{}}); activeSources=[]; playhead=0; }
+function stopPlayback(){ activeSources.forEach(s=>{try{s.stop()}catch{}}); activeSources=[]; playhead=0; ttsPlayingUntil=performance.now()+TTS_COOLDOWN_MS; }
 
 /* ============================== audio in =========================== */
 const workletCode=`
@@ -579,20 +663,126 @@ async function initMic(){
     srcNode=audioCtx.createMediaStreamSource(mediaStream);
     workletNode=new AudioWorkletNode(audioCtx,"pcm16k");
     workletNode.port.onmessage=e=>{
-      if(capturing&&wsReady)ws.send(e.data);
-      // level meter
+      // level meter (always computed so continuous-mode VAD can use it)
       const a=new Int16Array(e.data); let s=0;
       for(let i=0;i<a.length;i+=8)s+=Math.abs(a[i]);
       level=Math.min(1,(s/(a.length/8))/9000);
-      if(capturing)$("levelBar").style.width=(level*100).toFixed(0)+"%";
+      if(continuousMode) vadTick(level,e.data);
+      else{
+        if(capturing&&wsReady)ws.send(e.data);
+        if(capturing)$("levelBar").style.width=(level*100).toFixed(0)+"%";
+      }
     };
     srcNode.connect(workletNode);
   }
   $("micDot").className="dot on"; $("micState").textContent="ready";
 }
 
-/* ============================== talk flow ========================== */
+/* ============================== continuous / VAD mode ============== */
+let continuousMode=(localStorage.getItem("jarvisListenMode")==="continuous");
+let ttsPlayingUntil=0;             // timestamp (ms) until which mic input is suppressed (TTS playback + cooldown)
+const TTS_COOLDOWN_MS=400;         // extra mute time after playback ends, avoids tail-end self-hearing
+let vadSpeaking=false, vadSilenceMs=0, vadSpeechMs=0, vadLastT=0;
+let vadPreRoll=[];                 // ring buffer of recent PCM chunks captured *before* speech is confirmed,
+                                    // so the syllables that triggered VAD aren't lost when 'start' finally fires
+const VAD_PREROLL_CHUNKS=8;        // ~8 * 80ms = 640ms, comfortably covers VAD_MIN_SPEECH_MS + reaction time
+let vadSensitivity=4;              // 1 (very sensitive) .. 9 (needs loud speech), maps to an RMS-ish threshold
+const VAD_HANGOVER_MS=1500;        // silence required to end an utterance / turn.
+                                    // Kept deliberately above a normal breath or
+                                    // mid-sentence "thinking" pause so one turn keeps
+                                    // accumulating through them (while vadSpeaking is
+                                    // true every chunk is streamed regardless of level,
+                                    // so a segment survives internal silence).
+                                    // History, for anyone tempted to raise this again:
+                                    // it was escalated 700 -> 1400 -> 2800ms chasing a
+                                    // fragmentation bug that lived somewhere else
+                                    // entirely -- the barge-in stopPlayback() in vadTick
+                                    // was arming the TTS echo-suppression window against
+                                    // the user's own turn, so the turn was killed ~80ms
+                                    // after it opened and this constant was never even
+                                    // reached. That is fixed; raising this value was
+                                    // treating the symptom and only added dead air.
+const VAD_MIN_SPEECH_MS=200;       // must sustain speech this long before we start recording (avoid clicks/coughs)
+function vadThreshold(){ return 0.03+ (vadSensitivity-1)*0.02; } // 0.03 (sens=1) .. 0.19 (sens=9)
+
+function setMode(mode){
+  continuousMode = mode==="continuous";
+  localStorage.setItem("jarvisListenMode", continuousMode?"continuous":"ptt");
+  $("modeBtn").textContent = continuousMode?"CONTINUOUS LISTENING":"PUSH TO TALK";
+  $("modeBtn").classList.toggle("amber", !continuousMode);
+  vadSpeaking=false; vadSilenceMs=0; vadSpeechMs=0;
+  if(continuousMode){
+    if(capturing){capturing=false; if(wsReady)ws.send(JSON.stringify({type:"stop"}));}
+    $("talkBtn").style.display="none"; $("reactorWrap").title="Continuous listening — just speak";
+    initMic().then(()=>{ $("micState").textContent="listening…"; setState("listening","LISTENING","SPEAK ANYTIME"); }).catch(err=>addMsg("sys","mic blocked: "+err.message));
+  }else{
+    $("talkBtn").style.display=""; $("reactorWrap").title="Click to talk";
+    if(capturing){capturing=false; if(wsReady)ws.send(JSON.stringify({type:"stop"}));}
+    $("micState").textContent="ready"; $("levelBar").style.width="0%";
+    setState("standby","STANDBY");
+  }
+}
+function vadTick(lvl,chunk){
+  const now=performance.now();
+  const dt=vadLastT?Math.min(200,now-vadLastT):80; vadLastT=now;
+  const mutedByTts = now < ttsPlayingUntil;
+  if(mutedByTts){
+    // don't feed mic audio to the server while assistant is speaking (avoid self-trigger / echo)
+    if(vadSpeaking){ // assistant started talking mid-utterance (barge-in edge case) — end our turn quietly
+      vadSpeaking=false; vadSilenceMs=0; vadSpeechMs=0;
+      if(capturing){capturing=false; if(wsReady)ws.send(JSON.stringify({type:"stop"}));}
+    }
+    vadPreRoll=[];  // stale pre-mute audio must not prepend to the next turn
+    $("micState").textContent="muted (tts)"; $("levelBar").style.width="0%";
+    return;
+  }
+  const thresh=vadThreshold();
+  const above=lvl>thresh;
+  if(!vadSpeaking){
+    // keep a rolling pre-roll buffer of raw PCM chunks even while not yet "speaking" — this is the audio
+    // that actually contains the trigger syllables; without it, only silence-adjacent audio after the
+    // VAD_MIN_SPEECH_MS confirmation delay ever reaches the server, so the transcript is empty/garbage.
+    vadPreRoll.push(chunk);
+    if(vadPreRoll.length>VAD_PREROLL_CHUNKS) vadPreRoll.shift();
+    if(above){ vadSpeechMs+=dt; } else { vadSpeechMs=0; }
+    $("micState").textContent="listening…"; $("levelBar").style.width=(lvl*100).toFixed(0)+"%";
+    if(vadSpeechMs>=VAD_MIN_SPEECH_MS){
+      // speech confirmed → open a turn
+      vadSpeaking=true; vadSilenceMs=0;
+      if(!wsReady){vadSpeaking=false;vadSpeechMs=0;vadPreRoll=[];return}
+      // Barge-in: cut off assistant audio, but do NOT inherit stopPlayback()'s
+      // echo-suppression cooldown -- it would mute the very mic we are about to
+      // record from, and the next vadTick would see mutedByTts and instantly end
+      // the turn, so only the pre-roll ever reached the server.
+      stopPlayback(); ttsPlayingUntil=0; audioArrived=false;
+      ws.send(JSON.stringify({type:"start",sample_rate:16000,format:"pcm_s16le",channels:1,conversation:CONV}));
+      capturing=true;
+      // flush the buffered pre-roll so the beginning of the utterance isn't lost
+      for(const c of vadPreRoll) ws.send(c);
+      vadPreRoll=[];
+      $("micState").textContent="LIVE"; setState("listening","LISTENING","AUTO-SEND ON SILENCE");
+    }
+  }else{
+    if(capturing&&wsReady)ws.send(chunk);
+    $("micState").textContent="LIVE"; $("levelBar").style.width=(lvl*100).toFixed(0)+"%";
+    if(above){ vadSilenceMs=0; } else { vadSilenceMs+=dt; }
+    if(vadSilenceMs>=VAD_HANGOVER_MS){
+      // end of speech → auto-send
+      vadSpeaking=false; vadSilenceMs=0; vadSpeechMs=0;
+      capturing=false;
+      if(wsReady)ws.send(JSON.stringify({type:"stop"}));
+      vadPreRoll=[];
+      $("micState").textContent="listening…"; setState("thinking","PROCESSING");
+    }
+  }
+}
+$("vadSens").value=String(vadSensitivity);
+$("vadSens").addEventListener("input",()=>{ vadSensitivity=Number($("vadSens").value); localStorage.setItem("jarvisVadSens",String(vadSensitivity)); });
+{ const saved=localStorage.getItem("jarvisVadSens"); if(saved){vadSensitivity=Number(saved); $("vadSens").value=saved;} }
+
+/* ============================== talk flow (push-to-talk) ============ */
 async function toggleTalk(){
+  if(continuousMode)return; // ring click is a no-op in continuous mode; use the mode toggle to switch back
   if(!wsReady){addMsg("sys","voice server offline");return}
   if(capturing){ // stop talking
     capturing=false;
@@ -610,8 +800,11 @@ async function toggleTalk(){
   setState("listening","LISTENING","CLICK AGAIN TO SEND");
 }
 $("talkBtn").onclick=toggleTalk;
+$("syncTasksBtn").onclick=syncOmniFocusTasks;
 $("reactorWrap").onclick=toggleTalk;
 $("stopBtn").onclick=stopRun;
+$("modeBtn").onclick=()=>setMode(continuousMode?"ptt":"continuous");
+setMode(continuousMode?"continuous":"ptt");
 
 /* ---- pop-up viewer ---- */
 const DASH_PROXY=`https://${location.hostname}:9443`;
@@ -638,12 +831,75 @@ addEventListener("keydown",e=>{
 });
 
 /* ============================== typed chat ========================= */
+/* ---------------- image attachments ----------------
+   Hermes accepts inline data:image/... parts on a chat turn (and rejects
+   document parts), so images are sent straight to the model -- nothing is
+   written to disk. Photos are downscaled here first: a phone photo is 5-10 MB
+   and base64 inflates it ~33%, which would make every attachment turn slow for
+   no gain in what the model can actually see. */
+const MAX_IMAGES = 4;
+const MAX_DIM = 1600;
+let pendingImages = [];      // [{name, dataUrl}]
+
+function renderAttachments(){
+  const row=$("attachRow");
+  row.innerHTML="";
+  row.className = pendingImages.length ? "on" : "";
+  pendingImages.forEach((a,i)=>{
+    const c=document.createElement("div"); c.className="chip";
+    const im=document.createElement("img"); im.src=a.dataUrl; c.appendChild(im);
+    const s=document.createElement("span"); s.textContent=a.name; c.appendChild(s);
+    const x=document.createElement("b"); x.textContent="\u2715"; x.title="remove";
+    x.onclick=()=>{ pendingImages.splice(i,1); renderAttachments(); };
+    c.appendChild(x);
+    row.appendChild(c);
+  });
+}
+
+function loadImageFile(file){
+  return new Promise((resolve,reject)=>{
+    const url=URL.createObjectURL(file);
+    const img=new Image();
+    img.onload=()=>{ URL.revokeObjectURL(url); resolve(img); };
+    img.onerror=()=>{ URL.revokeObjectURL(url); reject(new Error("could not decode "+file.name)); };
+    img.src=url;
+  });
+}
+
+async function addImageFile(file){
+  // Canvas re-encode also normalises formats the model may not take (HEIC from
+  // an iPhone, for instance) into plain JPEG.
+  const img=await loadImageFile(file);
+  const scale=Math.min(1, MAX_DIM/Math.max(img.width,img.height));
+  const w=Math.max(1,Math.round(img.width*scale)), h=Math.max(1,Math.round(img.height*scale));
+  const cv=document.createElement("canvas"); cv.width=w; cv.height=h;
+  cv.getContext("2d").drawImage(img,0,0,w,h);
+  pendingImages.push({name:file.name||"image", dataUrl:cv.toDataURL("image/jpeg",0.85)});
+}
+
+$("attachBtn").onclick=()=>$("fileInput").click();
+$("fileInput").addEventListener("change",async e=>{
+  const files=Array.from(e.target.files||[]);
+  e.target.value="";                       // allow re-picking the same file
+  for(const f of files){
+    if(pendingImages.length>=MAX_IMAGES){ addMsg("sys",`max ${MAX_IMAGES} images per message`); break; }
+    if(!/^image\//.test(f.type)){ addMsg("sys",`${f.name}: images only for now`); continue; }
+    try{ await addImageFile(f); }
+    catch(err){ addMsg("sys","attach failed: "+err.message); }
+  }
+  renderAttachments();
+});
+
 async function sendChat(){
-  const inp=$("chatInput"); const text=inp.value.trim(); if(!text)return;
-  inp.value=""; addMsg("you",text); setState("thinking","PROCESSING");
+  const inp=$("chatInput"); const text=inp.value.trim();
+  if(!text && !pendingImages.length) return;
+  const imgs=pendingImages.map(a=>a.dataUrl);
+  const shown=text+(imgs.length?`${text?"\n":""}[${imgs.length} image${imgs.length>1?"s":""} attached]`:"");
+  pendingImages=[]; renderAttachments();
+  inp.value=""; autoGrowChat(); addMsg("you",shown); setState("thinking","PROCESSING");
   try{
     const r=await fetch("/api/chat",{method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({input:text,conversation:CONV})});
+      body:JSON.stringify({input:text,conversation:CONV,images:imgs})});
     const j=await r.json();
     if(!r.ok)throw new Error(j.error||r.status);
     (j.tools||[]).forEach(t=>addActivity("",t.name,t.preview));
@@ -656,7 +912,16 @@ async function sendChat(){
 }
 $("sendBtn").onclick=sendChat;
 $("clearBtn").onclick=()=>{feed.innerHTML="";addMsg("sys","chat cleared (history stays in Hermes — type /new to reset the conversation)");};
-$("chatInput").addEventListener("keydown",e=>{if(e.key==="Enter")sendChat()});
+function autoGrowChat(){
+  const el=$("chatInput");
+  el.style.height="auto";                       // shrink first so it can also get smaller
+  el.style.height=Math.min(el.scrollHeight,132)+"px";
+}
+$("chatInput").addEventListener("keydown",e=>{
+  // Enter sends; Shift+Enter (and IME composition) insert a newline instead.
+  if(e.key==="Enter"&&!e.shiftKey&&!e.isComposing){ e.preventDefault(); sendChat(); }
+});
+$("chatInput").addEventListener("input",autoGrowChat);
 
 /* ============================== widgets ============================ */
 async function jget(path){const r=await fetch("/api/hermes"+path);if(!r.ok)throw new Error(r.status);return r.json()}
@@ -686,6 +951,31 @@ async function refreshJobs(){
       `<div>▸ ${x.name||x.prompt?.slice(0,38)||x.id} <span class="${x.paused?"warn":"ok"}">${x.paused?"paused":"on"}</span></div>`).join("")
       :"<div>— none —</div>";
   }catch{ $("jobsList").innerHTML="<div>—</div>"; }
+}
+async function syncOmniFocusTasks(){
+  const el=$("activeTasksList");
+  const esc=s=>String(s||"").replace(/[<>&]/g,c=>({"<":"&lt;",">":"&gt;","&":"&amp;"}[c]));
+  el.innerHTML="<div style='color:var(--txt-dim)'>syncing…</div>";
+  try{
+    const r=await fetch("/api/omnifocus-tasks"); const j=await r.json();
+    const tasks=j.tasks||[];
+    if(!tasks.length){
+      // 503 + no cache means the Mac has never answered since boot.
+      el.innerHTML=j.error
+        ? "<div style='color:var(--warn)'>mac unreachable</div>"
+        : "<div>— nothing tagged next —</div>";
+      return;
+    }
+    let html=tasks.map(t=>`<div>▸ ${esc(t.name)}</div>`).join("");
+    if(j.stale){
+      // OmniFocus lives on the laptop; asleep is normal, so show the last known
+      // list and say plainly that it is old rather than blanking the panel.
+      const mins=j.cached_at?Math.round((Date.now()/1000-j.cached_at)/60):0;
+      html+=`<div style="color:var(--warn);font-size:10.5px;letter-spacing:1px;padding-top:3px">`+
+            `⚠ CACHED${mins?` · ${mins}m OLD`:""} · MAC ASLEEP</div>`;
+    }
+    el.innerHTML=html;
+  }catch(e){ el.innerHTML="<div style='color:var(--warn)'>error</div>"; }
 }
 async function refreshMachines(){
   try{
@@ -723,7 +1013,76 @@ async function refreshUsage(){
     }
   }catch{}
 }
-refreshHealth();refreshSkills();refreshJobs();refreshMachines();refreshUsage();
+async function refreshVoiceProvider(){
+  try{
+    const r=await fetch("/api/tts-provider"); const j=await r.json();
+    const label=j.provider==="kokoro"?"Kokoro (self-hosted)":"ElevenLabs";
+    ttsIsKokoro = (j.provider==="kokoro");
+    $("voiceProviderLabel").textContent=label;
+    $("voiceProviderBtn").textContent=j.provider==="kokoro"?"SWITCH TO ELEVENLABS":"SWITCH TO KOKORO";
+  }catch{ $("voiceProviderLabel").textContent="unavailable"; }
+}
+$("voiceProviderBtn").onclick=async()=>{
+  const btn=$("voiceProviderBtn"); const goingTo=btn.textContent.includes("KOKORO")?"kokoro":"elevenlabs";
+  btn.disabled=true;
+  try{
+    const r=await fetch("/api/tts-provider",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({provider:goingTo})});
+    if(!r.ok){const e=await r.json().catch(()=>({}));addMsg("sys","voice switch failed: "+(e.error||r.status));}
+    else addMsg("sys","voice engine switched to "+goingTo);
+  }catch(err){addMsg("sys","voice switch failed: "+err.message);}
+  finally{ btn.disabled=false; refreshVoiceProvider(); }
+};
+async function refreshModelLoadout(){
+  try{
+    const r=await fetch("/api/model"); const j=await r.json();
+    const cur=(j.current||{}).model||"";
+    const sel=$("modelSel");
+    if(sel.dataset.filled!=="1"){
+      sel.innerHTML=(j.available||[]).map(m=>`<option value="${m}">${m}</option>`).join("")
+        || "<option>—</option>";
+      sel.dataset.filled="1";
+    }
+    if(cur) sel.value=cur;
+    const es=$("effortSel");
+    if(es.dataset.filled!=="1"){
+      es.innerHTML=(j.effort_choices||[]).map(c=>`<option value="${c.id}" title="${c.hint}">${c.label}</option>`).join("");
+      es.dataset.filled="1";
+    }
+    if(j.effort) es.value=j.effort;
+    $("effortWarn").className = (j.effort==="high") ? "on" : "";
+  }catch{}
+}
+$("modelSel").onchange=async()=>{
+  const sel=$("modelSel"); const want=sel.value; sel.disabled=true;
+  try{
+    const r=await fetch("/api/model",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({model:want,provider:"anthropic"})});
+    const j=await r.json();
+    if(!r.ok){addMsg("sys","model switch failed: "+(j.error||r.status));}
+    else addMsg("sys","model switched to "+((j.current||{}).model||want)+" (this session)");
+  }catch(e){addMsg("sys","model switch failed: "+e.message);}
+  finally{ sel.disabled=false; refreshModelLoadout(); }
+};
+$("effortSel").onchange=async()=>{
+  const es=$("effortSel"); const want=es.value; es.disabled=true;
+  try{
+    const r=await fetch("/api/effort",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({effort:want})});
+    const j=await r.json();
+    if(!r.ok){addMsg("sys","effort change failed: "+(j.error||r.status));}
+    else addMsg("sys","thinking effort: "+want+(want==="high"?" — replies will be slow":""));
+  }catch(e){addMsg("sys","effort change failed: "+e.message);}
+  finally{ es.disabled=false; refreshModelLoadout(); }
+};
+const _origRefreshVoiceProvider = refreshVoiceProvider;
+refreshVoiceProvider = async function(){
+  await _origRefreshVoiceProvider();
+  try{
+    const el=$("ttsLoadout");
+    if(el) el.textContent=$("voiceProviderLabel").textContent||"—";
+  }catch{}
+};
+refreshHealth();refreshSkills();refreshJobs();refreshMachines();refreshUsage();refreshVoiceProvider();refreshModelLoadout();
 setInterval(refreshUsage,60000);
 setInterval(refreshHealth,15000); setInterval(refreshJobs,60000); setInterval(refreshMachines,10000);
 setInterval(refreshSkills,120000);
@@ -880,6 +1239,31 @@ addEventListener("keydown",e=>{
 bootSequence(new URLSearchParams(location.search).get("boot")==="full");
 
 addMsg("sys","Jarvis HUD online. Click the ring or press Space to talk.");
+
+/* ============================== history drawer ===================== */
+async function openHistory(){
+  $("historyDrawer").classList.add("open");
+  const list=$("historyList");
+  list.innerHTML="<div class='msg sys'>Loading\u2026</div>";
+  try{
+    const r=await fetch("/api/history?limit=200&conversation="+encodeURIComponent(CONV));
+    const j=await r.json();
+    const turns=j.turns||[];
+    if(!turns.length){list.innerHTML="<div class='msg sys'>No history yet \u2014 starts recording from now on.</div>";return}
+    list.innerHTML="";
+    for(const t of turns){
+      const d=document.createElement("div"); d.className="hturn";
+      const esc=s=>String(s||"").replace(/[<>&]/g,c=>({"<":"&lt;",">":"&gt;","&":"&amp;"}[c]));
+      const dt=t.iso?new Date(t.iso).toLocaleString():"";
+      d.innerHTML='<div class="hts">'+esc(dt)+'</div>'+(t.user?'<div class="hu">'+esc(t.user)+'</div>':"")+(t.jarvis?'<div class="hj">'+esc(t.jarvis)+'</div>':"");
+      list.appendChild(d);
+    }
+    list.scrollTop=list.scrollHeight;
+  }catch(err){list.innerHTML="<div class='msg sys'>Error: "+err.message+"</div>";}
+}
+$("historyClose").onclick=()=>$("historyDrawer").classList.remove("open");
+$("historyDrawer").addEventListener("click",e=>{if(e.target.id==="historyDrawer")$("historyDrawer").classList.remove("open")});
+addEventListener("keydown",e=>{if(e.key==="Escape"&&$("historyDrawer").classList.contains("open"))$("historyDrawer").classList.remove("open")});
 </script>
 </body>
 </html>

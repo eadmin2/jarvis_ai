@@ -35,6 +35,7 @@ import requests
 import uvicorn
 import yaml
 import numpy as np
+from scipy.signal import resample_poly
 from anthropic import Anthropic
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, RedirectResponse, Response
@@ -51,7 +52,24 @@ CONFIG_PATH = ROOT / "config" / "server.yaml"
 LOG_PATH = ROOT / "logs" / "latency.jsonl"
 STATE_PATH = ROOT / "logs" / "hermes_sessions.json"
 USAGE_PATH = ROOT / "logs" / "usage_stats.json"
+HISTORY_PATH = ROOT / "logs" / "conversation_history.jsonl"
 _USAGE_LOCK = threading.Lock()
+
+# Runtime reasoning-effort override set from the HUD. In-memory only: a restart
+# always returns to the server.yaml default, so a forgotten "deep" setting can
+# never silently persist across a reboot.
+EFFORT_OVERRIDE: dict = {"value": None}
+
+# Inline image attachments on typed HUD chat. Hermes' sessions API accepts
+# OpenAI-style image_url parts with data: URLs and converts them for Anthropic;
+# it explicitly REJECTS document/file parts, which is why only images are
+# supported here. The HUD downscales before upload, so these caps are a
+# backstop against a malformed or hostile client, not the normal path.
+MAX_CHAT_IMAGES = 4
+MAX_CHAT_IMAGE_BYTES = 8 * 1024 * 1024   # total, base64-encoded
+
+# Model ids Hermes knows the configured credential can reach.
+HERMES_MODELS_CACHE = Path.home() / ".hermes" / "provider_models_cache.json"
 
 
 def _today() -> str:
@@ -138,6 +156,7 @@ class TurnTiming:
     interrupted: bool = False
     tools_used: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    conversation: str = "jarvis-main"
 
     def summary(self) -> dict:
         eos = self.end_of_speech_monotonic
@@ -206,8 +225,13 @@ class HermesAPI:
         sid = state.get(name)
         if sid and not force_new:
             return sid
+        # Hermes enforces unique session titles, so a stable per-conversation
+        # title (e.g. "jarvis-main") collides with the previous session on
+        # every force_new — mint a unique title while keeping `name` as the
+        # stable lookup key in our own state file.
+        title = f"{name} — {time.strftime('%Y-%m-%d %H:%M:%S')}"
         r = requests.post(f"{self.base}/api/sessions", headers=self.headers(),
-                          json={"title": name}, timeout=15)
+                          json={"title": title}, timeout=15)
         r.raise_for_status()
         data = r.json()
         sid = (data.get("session") or data).get("id")
@@ -215,6 +239,30 @@ class HermesAPI:
         self._save_state(state)
         print(f"Created Hermes session '{name}' -> {sid}", flush=True)
         return sid
+
+    def get_session_model(self, session_id: str) -> dict:
+        """Current model/provider actually pinned on a session."""
+        r = requests.get(f"{self.base}/api/sessions/{session_id}",
+                         headers=self.headers(), timeout=15)
+        r.raise_for_status()
+        s = (r.json() or {}).get("session") or {}
+        return {"model": s.get("model") or "", "provider": s.get("billing_provider") or ""}
+
+    def set_session_model(self, session_id: str, model: str, provider: str) -> dict:
+        """Lock a session to a model.
+
+        Hermes resolves a turn's model as: lock > session-persisted > per-request.
+        A plain per-request ``model`` is therefore IGNORED once a session has one,
+        so switching mid-conversation must go through this lock endpoint. There is
+        no "clear" operation (an empty model returns 400) -- reverting means
+        locking explicitly back to the configured default.
+        """
+        r = requests.post(f"{self.base}/api/sessions/{session_id}/model",
+                          headers=self.headers(),
+                          json={"model": model, "provider": provider}, timeout=30)
+        if r.status_code >= 400:
+            raise RuntimeError(f"Hermes model lock HTTP {r.status_code}: {r.text[:300]}")
+        return r.json()
 
     def stop_run(self, run_id: str) -> dict:
         r = requests.post(f"{self.base}/v1/runs/{run_id}/stop", headers=self.headers(), timeout=15)
@@ -225,12 +273,37 @@ class HermesAPI:
                           json=body, timeout=15)
         return {"status_code": r.status_code, "body": r.text[:300]}
 
-    def chat_stream_events(self, session_id: str, input_text: str, timeout: float) -> Iterator[tuple[str, str]]:
+    def _effective_model_options(self) -> dict:
+        """Config model_options, with a runtime reasoning-effort override applied.
+
+        The HUD can raise effort temporarily (see POST /api/effort). Measured on
+        this deployment: effort "minimal" answered a multi-step puzzle in 2.6s and
+        got it wrong; "high" took 36s and got it right. Low effort is the right
+        default for speech -- the override exists for the occasional question
+        where correctness matters more than latency.
+        """
+        opts = dict(self.cfg.get("model_options") or {"reasoning_effort": "minimal"})
+        if EFFORT_OVERRIDE.get("value"):
+            opts["reasoning_effort"] = EFFORT_OVERRIDE["value"]
+        return opts
+
+    def chat_stream_events(self, session_id: str, input_text: "str | list",
+                           timeout: float) -> Iterator[tuple[str, str]]:
         """Yield ("run"|"text"|"tool"|"approval"|"final", value) from a session turn."""
+        payload = {
+            "message": input_text,
+            "instructions": self.cfg.get("instructions") or "",
+            # Voice turns should optimize for low latency over deep reasoning.
+            "model_options": self._effective_model_options(),
+        }
+        if self.cfg.get("model"):
+            payload["model"] = self.cfg["model"]
+        if self.cfg.get("provider"):
+            payload["provider"] = self.cfg["provider"]
         resp = requests.post(
             f"{self.base}/api/sessions/{session_id}/chat/stream",
             headers={**self.headers(), "Accept": "text/event-stream"},
-            json={"input": input_text}, stream=True, timeout=(10, timeout),
+            json=payload, stream=True, timeout=(10, timeout),
         )
         if resp.status_code >= 400:
             resp.close()
@@ -434,20 +507,95 @@ class VoicePipelineServer:
 
     # ------------------------------------------------------------------ TTS
 
+    _KOKORO_CLAUSE_SPLIT_RE = re.compile(r"(?<=[,;:\u2014\u2013])\s+")
+
+    @classmethod
+    def _split_into_clauses(cls, text: str, min_chars: int) -> list[str]:
+        """Split on clause punctuation (comma/semicolon/colon/dash), merging
+        short fragments so no clause falls under min_chars. Disabled (returns
+        [text] unchanged) if there's nothing to split on. This exists ONLY to
+        reduce Kokoro's time-to-first-audio on long sentences: it is CPU-bound
+        and non-streaming per call (see _tts_chunks_kokoro), so synthesizing
+        and speaking a short first clause while later clauses are still being
+        requested cuts perceived latency substantially, at the cost of a tiny
+        gap between clauses. ElevenLabs is unaffected by this entirely.
+        """
+        parts = [p.strip() for p in cls._KOKORO_CLAUSE_SPLIT_RE.split(text) if p.strip()]
+        if len(parts) <= 1:
+            return [text]
+        merged: list[str] = []
+        buf = ""
+        for p in parts:
+            buf = f"{buf} {p}".strip() if buf else p
+            if len(buf) >= min_chars:
+                merged.append(buf)
+                buf = ""
+        if buf:
+            if merged:
+                merged[-1] = f"{merged[-1]} {buf}"
+            else:
+                merged.append(buf)
+        return merged
+
+    def _tts_chunks_kokoro(self, text: str, pcfg: dict, timing: TurnTiming) -> Iterator[bytes]:
+        """Kokoro-FastAPI (self-hosted, OpenAI-compatible) TTS.
+
+        Kokoro's raw PCM output is fixed at 24 kHz; the HUD client hardcodes
+        16 kHz PCM playback, so we resample 24k -> 16k (an exact 3:2 ratio,
+        no fractional-rate artifacts) before handing bytes to the websocket.
+
+        chunk_clauses (default True): split long sentences into clauses and
+        request/yield them one at a time, so the first bit of audio is ready
+        much sooner than waiting for the whole sentence. Set chunk_clauses:
+        false in server.yaml's voice.kokoro block to fully disable and revert
+        to one Kokoro call per sentence (the original, simpler behavior).
+        """
+        base_url = pcfg.get("kokoro_url", "http://localhost:8880").rstrip("/")
+        if pcfg.get("chunk_clauses", True):
+            clauses = self._split_into_clauses(text, pcfg.get("min_clause_chars", 25))
+        else:
+            clauses = [text]
+        for clause in clauses:
+            payload = {
+                "model": "kokoro",
+                "input": clause,
+                "voice": pcfg["voice_id"],
+                "response_format": "pcm",
+                "stream": False,
+            }
+            response = requests.post(f"{base_url}/v1/audio/speech", json=payload, timeout=60)
+            if response.status_code >= 400:
+                raise RuntimeError(f"Kokoro HTTP {response.status_code}: {response.text[:1000]}")
+            raw = np.frombuffer(response.content, dtype="<i2")
+            if raw.size == 0:
+                continue
+            resampled = resample_poly(raw.astype(np.float32), 2, 3)  # 24kHz -> 16kHz
+            pcm16 = np.clip(resampled, -32768, 32767).astype("<i2").tobytes()
+            chunk_size = 4096
+            for i in range(0, len(pcm16), chunk_size):
+                if timing.first_tts_audio_byte_monotonic is None:
+                    timing.first_tts_audio_byte_monotonic = time.perf_counter()
+                yield pcm16[i:i + chunk_size]
+
     def tts_chunks_sync(self, text: str, timing: TurnTiming) -> Iterator[bytes]:
         voice = self.cfg["voice"]
+        provider = voice.get("provider", "elevenlabs")
+        pcfg = voice.get(provider, voice)  # nested per-provider config, flat dict as fallback
+        timing.tts_model = pcfg.get("model", provider)
+        timing.voice_id = pcfg.get("voice_id")
+        timing.tts_request_start_monotonic = timing.tts_request_start_monotonic or time.perf_counter()
+        record_usage(tts_chars=len(text))
+        if provider == "kokoro":
+            yield from self._tts_chunks_kokoro(text, pcfg, timing)
+            return
         key = os.environ.get("ELEVENLABS_API_KEY") or os.environ.get("ELEVEN_API_KEY") or os.environ.get("XI_API_KEY")
         if not key:
             raise RuntimeError("ElevenLabs API key not found")
-        timing.tts_model = voice["model"]
-        timing.voice_id = voice["voice_id"]
-        timing.tts_request_start_monotonic = timing.tts_request_start_monotonic or time.perf_counter()
-        record_usage(tts_chars=len(text))
-        url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice['voice_id']}/stream"
-        params = {"output_format": voice.get("output_format", "pcm_16000")}
+        url = f"https://api.elevenlabs.io/v1/text-to-speech/{pcfg['voice_id']}/stream"
+        params = {"output_format": pcfg.get("output_format", "pcm_16000")}
         payload = {
             "text": text,
-            "model_id": voice["model"],
+            "model_id": pcfg["model"],
             "voice_settings": {
                 "stability": 0.55, "similarity_boost": 0.70,
                 "style": 0.10, "use_speaker_boost": True,
@@ -479,6 +627,7 @@ class VoicePipelineServer:
         pending = ""
         full_response: list[str] = []
         spoken = False
+        self._last_ack_monotonic = 0.0   # allow an ack early in each new turn
         await ws.send_json({"type": "agent_status", "state": "thinking"})
 
         q: asyncio.Queue = asyncio.Queue()
@@ -510,6 +659,8 @@ class VoicePipelineServer:
                     timing.tools_used.append(info.get("name", "tool"))
                     await ws.send_json({"type": "agent_status", "state": "tool_use",
                                         "tool": info.get("name"), "preview": info.get("preview", "")})
+                    # Tool work is where generation goes quiet; cover the silence.
+                    await self._maybe_speak_ack(ws, timing)
                     continue
                 if kind == "approval":
                     await ws.send_json({"type": "approval_request", "data": json.loads(value),
@@ -567,6 +718,41 @@ class VoicePipelineServer:
             yield item
         await worker_task
 
+    # Rotating index + last-spoken time for the tool-call acknowledgement.
+    _ack_index = 0
+    _last_ack_monotonic = 0.0
+
+    async def _maybe_speak_ack(self, ws: WebSocket, timing: TurnTiming) -> bool:
+        """Speak a short filler when the agent stops talking to run a tool.
+
+        Measured here: turns that call tools run at 1.72x realtime with 70% falling
+        behind playback (vs 1.08x / 40% without), and one observed tool turn spent
+        ~16s not speaking. No jitter buffer covers that -- the client simply runs
+        out of audio. Rather than dead air, queue a short spoken ack; because it
+        goes through the normal TTS path it lands *behind* whatever is still
+        buffered, so it fills the hole instead of interrupting.
+
+        Honours the previously-unimplemented hermes.ack_after_seconds /
+        hermes.ack_texts config: 0 disables, >0 is the minimum gap between acks so
+        a burst of tool calls does not produce a burst of chatter.
+        """
+        hcfg = self.cfg.get("hermes") or {}
+        gap = float(hcfg.get("ack_after_seconds", 0) or 0)
+        texts = hcfg.get("ack_texts") or []
+        if gap <= 0 or not texts:
+            return False
+        now = time.perf_counter()
+        if now - self._last_ack_monotonic < gap:
+            return False
+        self._last_ack_monotonic = now
+        text = texts[self._ack_index % len(texts)]
+        self._ack_index += 1
+        try:
+            await self._send_tts_sentence(ws, text, timing)
+        except Exception:
+            return False  # never let filler audio break a real turn
+        return True
+
     async def _send_tts_sentence(self, ws: WebSocket, sentence: str, timing: TurnTiming) -> None:
         if not sentence:
             return
@@ -622,6 +808,17 @@ class VoicePipelineServer:
         with LOG_PATH.open("a", encoding="utf-8") as f:
             f.write(json.dumps(summary, ensure_ascii=False) + "\n")
         print("TURN TIMING", json.dumps(summary, ensure_ascii=False), flush=True)
+        # Save to conversation history (only meaningful turns)
+        if summary.get("transcript") or summary.get("response_text"):
+            hist_entry = {
+                "ts": time.time(),
+                "iso": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "conversation": timing.conversation,
+                "user": summary.get("transcript", ""),
+                "jarvis": summary.get("response_text", ""),
+            }
+            with HISTORY_PATH.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(hist_entry, ensure_ascii=False) + "\n")
 
 
 load_env()
@@ -756,9 +953,46 @@ async def hud_chat(request: Request) -> JSONResponse:
     """Typed chat from the HUD — same Hermes session as voice."""
     body = await request.json()
     text = (body.get("input") or "").strip()
+    images = body.get("images") or []
     conversation = body.get("conversation") or (CFG.get("hermes") or {}).get("conversation", "jarvis-main")
-    if not text:
+
+    if not isinstance(images, list):
+        return JSONResponse({"error": "images must be a list"}, status_code=400)
+    if len(images) > MAX_CHAT_IMAGES:
+        return JSONResponse({"error": f"at most {MAX_CHAT_IMAGES} images per message"}, status_code=400)
+    total_bytes = 0
+    for url in images:
+        # Only data:image/... is accepted. Remote URLs would make the server
+        # fetch arbitrary hosts on a caller's behalf; documents are rejected by
+        # Hermes anyway and would fail later with a confusing error.
+        if not isinstance(url, str) or not url.startswith("data:image/"):
+            return JSONResponse({"error": "images must be data:image/... URLs"}, status_code=400)
+        total_bytes += len(url)
+    if total_bytes > MAX_CHAT_IMAGE_BYTES:
+        return JSONResponse(
+            {"error": f"attached images too large ({total_bytes // 1024} KB); "
+                      f"limit is {MAX_CHAT_IMAGE_BYTES // 1024} KB"},
+            status_code=413,
+        )
+    if not text and not images:
         return JSONResponse({"error": "empty input"}, status_code=400)
+
+    # /new and /reset are handled locally: they never reach the model. This
+    # was previously advertised in the UI (placeholder text, clear-button
+    # hint) but not actually implemented — the client just wiped the visible
+    # feed while silently continuing the same Hermes session/history.
+    if re.match(r"^/(new|reset)\b", text, re.I):
+        HERMES.get_session_id(conversation, force_new=True)
+        return JSONResponse({"text": "Started a new session.", "tools": [], "run_id": None})
+
+    # Text-only stays a plain string so prompt caching and trajectory logging see
+    # the shape they always have; only an attachment turn becomes a parts list.
+    if images:
+        message: object = [{"type": "text", "text": text or "(image attached)"}]
+        message.extend({"type": "image_url", "image_url": {"url": u}} for u in images)
+    else:
+        message = text
+
     out: dict = {"text": "", "tools": [], "run_id": None}
 
     def run_sync() -> None:
@@ -766,7 +1000,7 @@ async def hud_chat(request: Request) -> JSONResponse:
 
         def consume(sid: str) -> list[str]:
             parts: list[str] = []
-            for kind, value in HERMES.chat_stream_events(sid, text, timeout):
+            for kind, value in HERMES.chat_stream_events(sid, message, timeout):
                 if kind == "text":
                     parts.append(value)
                 elif kind == "tool":
@@ -799,9 +1033,26 @@ async def hud_chat(request: Request) -> JSONResponse:
 _ELEVEN_CACHE: dict = {"ts": 0.0, "data": None}
 
 
+@app.get("/api/history")
+async def get_history(limit: int = 100, conversation: str = "") -> JSONResponse:
+    """Return recent conversation turns from history log."""
+    if not HISTORY_PATH.exists():
+        return JSONResponse({"turns": []})
+    lines = HISTORY_PATH.read_text(encoding="utf-8").strip().splitlines()
+    turns = []
+    for line in lines:
+        try:
+            entry = json.loads(line)
+            if conversation and entry.get("conversation") != conversation:
+                continue
+            turns.append(entry)
+        except Exception:
+            pass
+    return JSONResponse({"turns": turns[-limit:]})
+
+
 @app.get("/api/usage")
 async def usage() -> JSONResponse:
-    """LLM token usage (local tally) + ElevenLabs subscription quota."""
     u = read_usage()
     cost_cfg = CFG.get("usage") or {}
     cin = float(cost_cfg.get("llm_cost_per_mtok_input", 0) or 0)
@@ -860,6 +1111,122 @@ async def usage() -> JSONResponse:
 WS_CLIENTS: set = set()
 
 
+# Only offer models on the provider the voice path is actually authenticated for.
+# The cache also lists an openai-api section, but that credential is separate
+# (and currently rate-limit exhausted); offering those here would hand the user a
+# one-click way to break Jarvis exactly the way the ox-alpha switch did.
+MODEL_PROVIDER = "anthropic"
+
+
+def _available_models() -> list[str]:
+    """Model ids from Hermes' own provider cache, restricted to MODEL_PROVIDER."""
+    try:
+        data = json.loads(HERMES_MODELS_CACHE.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    entry = (data or {}).get(MODEL_PROVIDER)
+    out: list[str] = []
+    if isinstance(entry, dict):
+        for m in entry.get("models") or []:
+            if isinstance(m, str):
+                out.append(m)
+    # Current-generation first, dated snapshots after; stable and de-duplicated.
+    seen, ordered = set(), []
+    for m in sorted(out):
+        if m not in seen:
+            seen.add(m)
+            ordered.append(m)
+    return sorted(ordered, key=lambda m: (any(ch.isdigit() for ch in m.split("-")[-1])
+                                          and len(m.split("-")[-1]) == 8, m))
+
+
+EFFORT_CHOICES = [
+    {"id": "minimal", "label": "FAST", "hint": "default \u2014 speech latency"},
+    {"id": "medium", "label": "BALANCED", "hint": "slower, more careful"},
+    {"id": "high", "label": "DEEP", "hint": "much slower \u2014 for analysis"},
+]
+
+
+@app.get("/api/model")
+async def get_model() -> JSONResponse:
+    """Live model pinned on the current session + the effort override."""
+    conversation = (CFG.get("hermes") or {}).get("conversation", "jarvis-main")
+    current = {"model": "", "provider": ""}
+    try:
+        sid = HERMES.get_session_id(conversation)
+        current = await asyncio.to_thread(HERMES.get_session_model, sid)
+    except Exception as exc:
+        current = {"model": "", "provider": "", "error": str(exc)[:200]}
+    return JSONResponse({
+        "current": current,
+        "available": _available_models(),
+        "effort": EFFORT_OVERRIDE.get("value") or
+                  ((CFG.get("hermes") or {}).get("model_options") or {}).get("reasoning_effort", "minimal"),
+        "effort_choices": EFFORT_CHOICES,
+        "effort_overridden": bool(EFFORT_OVERRIDE.get("value")),
+    })
+
+
+@app.post("/api/model")
+async def set_model(request: Request) -> JSONResponse:
+    """Lock the live session to a model. Reverting = pick the default again."""
+    body = await request.json()
+    model = (body.get("model") or "").strip()
+    provider = (body.get("provider") or MODEL_PROVIDER).strip()
+    if not model:
+        return JSONResponse({"error": "model is required"}, status_code=400)
+    if model not in _available_models():
+        return JSONResponse({"error": f"unknown model '{model}'"}, status_code=400)
+    conversation = (CFG.get("hermes") or {}).get("conversation", "jarvis-main")
+    try:
+        sid = HERMES.get_session_id(conversation)
+        await asyncio.to_thread(HERMES.set_session_model, sid, model, provider)
+        current = await asyncio.to_thread(HERMES.get_session_model, sid)
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)[:300]}, status_code=502)
+    return JSONResponse({"current": current, "session_id": sid})
+
+
+@app.post("/api/effort")
+async def set_effort(request: Request) -> JSONResponse:
+    """Set (or clear) the runtime reasoning-effort override. In-memory only."""
+    body = await request.json()
+    effort = (body.get("effort") or "").strip()
+    valid = {c["id"] for c in EFFORT_CHOICES}
+    if effort and effort not in valid:
+        return JSONResponse({"error": f"effort must be one of {sorted(valid)}"}, status_code=400)
+    EFFORT_OVERRIDE["value"] = effort or None
+    return JSONResponse({
+        "effort": effort or ((CFG.get("hermes") or {}).get("model_options") or {}).get("reasoning_effort", "minimal"),
+        "effort_overridden": bool(effort),
+    })
+
+
+
+@app.get("/api/tts-provider")
+async def get_tts_provider() -> JSONResponse:
+    voice = CFG["voice"]
+    return JSONResponse({
+        "provider": voice.get("provider", "elevenlabs"),
+        "available": [p for p in ("elevenlabs", "kokoro") if p in voice],
+        "voice_name": voice.get(voice.get("provider", "elevenlabs"), {}).get("voice_name"),
+    })
+
+
+@app.post("/api/tts-provider")
+async def set_tts_provider(request: Request) -> JSONResponse:
+    body = await request.json()
+    provider = body.get("provider")
+    voice = CFG["voice"]
+    if provider not in ("elevenlabs", "kokoro"):
+        return JSONResponse({"error": "provider must be \'elevenlabs\' or \'kokoro\'"}, status_code=400)
+    if provider not in voice:
+        return JSONResponse({"error": f"no config for provider \'{provider}\' in server.yaml"}, status_code=400)
+    voice["provider"] = provider  # in-memory only; server.yaml keeps the boot-time default
+    return JSONResponse({"provider": provider, "voice_name": voice[provider].get("voice_name")})
+
+
+
 @app.post("/api/summon")
 async def summon(request: Request) -> JSONResponse:
     """Broadcast a holographic media panel to all connected HUD clients.
@@ -888,6 +1255,132 @@ async def summon(request: Request) -> JSONResponse:
 
 
 _WORKER_CACHE: dict = {"ts": 0.0, "data": [], "refreshing": False}
+
+
+# --------------------------------------------------------------- OmniFocus
+# OmniFocus is a Mac app with no cloud API, so unlike ClickUp the VPS cannot
+# query it directly. Hermes reaches it (see the `omnifocus` skill) by running
+# osascript on the Mac through LMCP's run_terminal_command; this endpoint drives
+# the same relay itself, so the panel needs no agent turn.
+#
+# Two things bite here and are easy to lose:
+#   * Cloudflare in front of the relay rejects unknown clients with error 1010
+#     ("browser_signature_banned"). A browser User-Agent is REQUIRED or every
+#     call 403s with no useful message.
+#   * The LMCP omnifocus_* tools falsely report "requires OmniFocus Pro"
+#     (LMCP bug FB-66FA8F). AppleScript works fine, which is why this shells out.
+#
+# The Mac is a laptop and sleeps, so a failed refresh is normal rather than
+# exceptional: the last good list is cached and returned marked stale.
+LMCP_UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+           "(KHTML, like Gecko) Chrome/126.0 Safari/537.36")
+OMNIFOCUS_TAG = "next"
+
+# Names are joined with linefeed rather than the default comma: task names
+# contain commas and parentheses, so a comma split would mangle them.
+OMNIFOCUS_SCRIPT = [
+    "set text item delimiters to linefeed",
+    ('tell application "OmniFocus" to tell default document to set nm to '
+     "name of every flattened task whose completed is false "
+     f'and (name of its tags) contains "{OMNIFOCUS_TAG}"'),
+    "return nm as text",
+]
+
+_OMNIFOCUS_CACHE: dict = {"tasks": [], "at": 0.0}
+
+
+def _lmcp_url() -> str:
+    """Relay URL (with token) from Hermes' config. Never log this value."""
+    cfg_text = (Path.home() / ".hermes" / "config.yaml").read_text(encoding="utf-8")
+    m = re.search(r"url:\s*(https://\S*local-mcp\S*)", cfg_text)
+    if not m:
+        raise RuntimeError("local-mcp url not found in ~/.hermes/config.yaml")
+    return m.group(1).strip().strip('"').strip("'")
+
+
+def _lmcp_run(command: str, timeout: float = 25.0) -> str:
+    """Run a shell command on the Mac via LMCP; return stdout."""
+    url = _lmcp_url()
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream",
+        "User-Agent": LMCP_UA,      # required: Cloudflare 1010 without it
+    }
+    r = requests.post(url, headers=headers, timeout=timeout, json={
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": {"protocolVersion": "2025-06-18", "capabilities": {},
+                   "clientInfo": {"name": "jarvis-hud", "version": "1.0"}},
+    })
+    if r.status_code >= 400:
+        raise RuntimeError(f"LMCP initialize HTTP {r.status_code}")
+    sid = r.headers.get("Mcp-Session-Id") or r.headers.get("mcp-session-id")
+    if sid:
+        headers["Mcp-Session-Id"] = sid
+    requests.post(url, headers=headers, timeout=timeout,
+                  json={"jsonrpc": "2.0", "method": "notifications/initialized"})
+
+    r = requests.post(url, headers=headers, timeout=timeout, json={
+        "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+        "params": {"name": "run_terminal_command",
+                   # confirm:true runs it outright; without it the tool only previews.
+                   "arguments": {"command": command, "confirm": True}},
+    })
+    if r.status_code >= 400:
+        raise RuntimeError(f"LMCP tools/call HTTP {r.status_code}")
+
+    text = ""
+    for part in ((r.json().get("result") or {}).get("content") or []):
+        if part.get("type") == "text":
+            text += part.get("text") or ""
+    # The payload is wrapped in an untrusted-content banner; the tool's own JSON
+    # result is the first object in it.
+    start = text.find("{")
+    if start < 0:
+        raise RuntimeError("no JSON payload in LMCP response")
+    payload, _ = json.JSONDecoder().raw_decode(text[start:])
+    if payload.get("exit_code") not in (0, None):
+        raise RuntimeError(f"command exit {payload.get('exit_code')}")
+    return payload.get("output") or ""
+
+
+@app.get("/api/omnifocus-tasks")
+async def omnifocus_tasks() -> JSONResponse:
+    """Incomplete OmniFocus tasks tagged `next`, via the Mac over LMCP."""
+    cmd = "osascript " + " ".join("-e " + json.dumps(line) for line in OMNIFOCUS_SCRIPT)
+    try:
+        out = await asyncio.to_thread(_lmcp_run, cmd)
+    except Exception as exc:
+        # Mac asleep / relay down: serve the last good list rather than blanking.
+        return JSONResponse({
+            "tasks": _OMNIFOCUS_CACHE["tasks"],
+            "stale": bool(_OMNIFOCUS_CACHE["tasks"]),
+            "cached_at": _OMNIFOCUS_CACHE["at"],
+            "error": str(exc)[:200],
+        }, status_code=200 if _OMNIFOCUS_CACHE["tasks"] else 503)
+
+    tasks = [{"name": n.strip()} for n in out.splitlines() if n.strip()]
+    _OMNIFOCUS_CACHE.update(tasks=tasks, at=time.time())
+    return JSONResponse({"tasks": tasks, "stale": False, "cached_at": _OMNIFOCUS_CACHE["at"]})
+
+
+@app.get("/api/clickup-tasks")
+async def clickup_tasks() -> JSONResponse:
+    """Fetch active tasks from ClickUp MyActiveTasks view."""
+    import urllib.request as _ur
+    try:
+        secret_path = Path.home() / ".hermes/secrets/clickup.env"
+        token = secret_path.read_text().strip().split("=", 1)[1].strip()
+        req = _ur.Request(
+            "https://api.clickup.com/api/v2/view/8cnta2f-5495/task",
+            headers={"Authorization": token, "Content-Type": "application/json"},
+        )
+        with _ur.urlopen(req, timeout=8) as resp:
+            data = json.loads(resp.read())
+        tasks = [{"id": t["id"], "name": t["name"], "status": t["status"]["status"]}
+                 for t in data.get("tasks", [])]
+        return JSONResponse({"tasks": tasks})
+    except Exception as exc:
+        return JSONResponse({"tasks": [], "error": str(exc)}, status_code=500)
 
 
 @app.get("/api/machines")
@@ -1163,6 +1656,7 @@ async def websocket_endpoint(ws: WebSocket) -> None:
                     conn.last_partial_bytes = 0
                     conn.recording = True
                     conn.timing = TurnTiming(turn_id=pipeline.next_turn_id())
+                    conn.timing.conversation = conn.conversation
                     conn.timing.audio_start_monotonic = time.perf_counter()
                     conn.timing.stt_model = CFG["stt"]["model"]
                     await ws.send_json({"type": "status", "message": f"Turn {conn.timing.turn_id} recording started."})

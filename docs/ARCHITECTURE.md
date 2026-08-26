@@ -18,8 +18,13 @@
    (incl. `interrupted` flag), `run.completed` (token usage), `*approval*`
    (→ HUD approval cards).
 5. Text is sentence-split, markdown/think-block-stripped, **secret-redacted**,
-   then each sentence streams through ElevenLabs back to the client as raw PCM
-   while generation continues.
+   then each sentence is synthesized by the active TTS provider
+   (`voice.provider`: `elevenlabs` or `kokoro`, switchable live via
+   `POST /api/tts-provider`, no restart) and streamed back to the client as
+   raw 16 kHz PCM while generation continues. ElevenLabs streams natively;
+   Kokoro is CPU-bound and non-streaming per call, so long sentences are
+   split on clause punctuation first (`voice.kokoro.chunk_clauses`) so the
+   first bit of audio doesn't wait on the whole sentence.
 
 Why the Sessions API and not `/v1/responses` or `/v1/runs`: on Hermes v0.16,
 sessions are the only surface that combines named persistent memory, run ids,
@@ -56,9 +61,15 @@ approval_request{data,run_id} · error · done{timing}
 |---|---|
 | `/hud/` | the HUD (static, single file) |
 | `/api/hermes/{path}` | **allowlist** proxy to Hermes API, injects the bearer key (GET: health, capabilities, skills, toolsets, jobs, sessions; POST: v1/responses only) |
-| `/api/chat` | typed chat turn on the shared voice session |
+| `/api/chat` | typed chat turn on the shared voice session. Accepts an optional `images` array of `data:image/...` URLs, which become OpenAI-style `image_url` content parts; remote URLs are refused (they would make the server fetch arbitrary hosts) and non-image data URLs are rejected because Hermes does not accept document parts on this endpoint. Text-only turns stay a plain string so prompt caching is unaffected. Max 4 images / 8MB |
 | `/api/machines` | host psutil stats + remote workers from config |
 | `/api/usage` | local token/char tally + ElevenLabs quota (needs user_read on the key) |
+| `/api/tts-provider` | `GET` returns the active TTS provider (`elevenlabs`/`kokoro`) and its voice name; `POST {"provider": ...}` switches it in memory (resets to the `server.yaml` default on restart) |
+| `/api/model` | `GET` returns the model currently pinned on the live Hermes session plus the ids available to the configured credential; `POST {"model": ...}` locks the session to that model. Uses Hermes' `POST /api/sessions/{id}/model` because Hermes resolves a turn as lock > session-persisted > per-request, so a plain per-request `model` is ignored once a session has one. The swap preserves the conversation; reverting means selecting the default again (Hermes has no clear-lock operation) |
+| `/api/effort` | `POST {"effort": "minimal"\|"medium"\|"high"}` sets a runtime reasoning-effort override injected into `model_options` per turn; empty string clears it. In-memory only, so a restart returns to the `server.yaml` default |
+| `/api/history` | `GET /api/history?limit=100&conversation=NAME` — recent turns (`{ts, iso, conversation, user, jarvis}`) from the append-only `logs/conversation_history.jsonl`, filterable by conversation, used by the HUD history drawer |
+| `/api/omnifocus-tasks` | incomplete OmniFocus tasks tagged `next`. OmniFocus has no remote API, so this runs `osascript` on the Mac through the LMCP relay (`run_terminal_command` with `confirm:true`) rather than calling a cloud service. A browser `User-Agent` is **required** — Cloudflare in front of the relay rejects unknown clients with error 1010. Results are cached in memory and returned with `stale: true` when the Mac is unreachable, since it runs on a laptop |
+| `/api/clickup-tasks` | fetches the configured ClickUp view and returns `{id, name, status}` per task; the API token is read server-side from `~/.hermes/secrets/clickup.env` and never reaches the browser. Returns an empty list plus an `error` field on failure rather than throwing |
 | `/api/summon` | broadcasts a holographic media panel (`{media, src, title, position}` or `{action:"dismiss"}`) to every connected HUD over its WebSocket — this is what the bundled `hud_display` Hermes plugin calls |
 | port 9443 (separate app) | TLS reverse proxy of the Hermes dashboard with WebSocket bridge and frame-header stripping, so the HTTPS HUD can iframe it |
 
