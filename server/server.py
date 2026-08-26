@@ -60,6 +60,14 @@ _USAGE_LOCK = threading.Lock()
 # never silently persist across a reboot.
 EFFORT_OVERRIDE: dict = {"value": None}
 
+# Inline image attachments on typed HUD chat. Hermes' sessions API accepts
+# OpenAI-style image_url parts with data: URLs and converts them for Anthropic;
+# it explicitly REJECTS document/file parts, which is why only images are
+# supported here. The HUD downscales before upload, so these caps are a
+# backstop against a malformed or hostile client, not the normal path.
+MAX_CHAT_IMAGES = 4
+MAX_CHAT_IMAGE_BYTES = 8 * 1024 * 1024   # total, base64-encoded
+
 # Model ids Hermes knows the configured credential can reach.
 HERMES_MODELS_CACHE = Path.home() / ".hermes" / "provider_models_cache.json"
 
@@ -279,7 +287,8 @@ class HermesAPI:
             opts["reasoning_effort"] = EFFORT_OVERRIDE["value"]
         return opts
 
-    def chat_stream_events(self, session_id: str, input_text: str, timeout: float) -> Iterator[tuple[str, str]]:
+    def chat_stream_events(self, session_id: str, input_text: "str | list",
+                           timeout: float) -> Iterator[tuple[str, str]]:
         """Yield ("run"|"text"|"tool"|"approval"|"final", value) from a session turn."""
         payload = {
             "message": input_text,
@@ -944,8 +953,28 @@ async def hud_chat(request: Request) -> JSONResponse:
     """Typed chat from the HUD — same Hermes session as voice."""
     body = await request.json()
     text = (body.get("input") or "").strip()
+    images = body.get("images") or []
     conversation = body.get("conversation") or (CFG.get("hermes") or {}).get("conversation", "jarvis-main")
-    if not text:
+
+    if not isinstance(images, list):
+        return JSONResponse({"error": "images must be a list"}, status_code=400)
+    if len(images) > MAX_CHAT_IMAGES:
+        return JSONResponse({"error": f"at most {MAX_CHAT_IMAGES} images per message"}, status_code=400)
+    total_bytes = 0
+    for url in images:
+        # Only data:image/... is accepted. Remote URLs would make the server
+        # fetch arbitrary hosts on a caller's behalf; documents are rejected by
+        # Hermes anyway and would fail later with a confusing error.
+        if not isinstance(url, str) or not url.startswith("data:image/"):
+            return JSONResponse({"error": "images must be data:image/... URLs"}, status_code=400)
+        total_bytes += len(url)
+    if total_bytes > MAX_CHAT_IMAGE_BYTES:
+        return JSONResponse(
+            {"error": f"attached images too large ({total_bytes // 1024} KB); "
+                      f"limit is {MAX_CHAT_IMAGE_BYTES // 1024} KB"},
+            status_code=413,
+        )
+    if not text and not images:
         return JSONResponse({"error": "empty input"}, status_code=400)
 
     # /new and /reset are handled locally: they never reach the model. This
@@ -956,6 +985,14 @@ async def hud_chat(request: Request) -> JSONResponse:
         HERMES.get_session_id(conversation, force_new=True)
         return JSONResponse({"text": "Started a new session.", "tools": [], "run_id": None})
 
+    # Text-only stays a plain string so prompt caching and trajectory logging see
+    # the shape they always have; only an attachment turn becomes a parts list.
+    if images:
+        message: object = [{"type": "text", "text": text or "(image attached)"}]
+        message.extend({"type": "image_url", "image_url": {"url": u}} for u in images)
+    else:
+        message = text
+
     out: dict = {"text": "", "tools": [], "run_id": None}
 
     def run_sync() -> None:
@@ -963,7 +1000,7 @@ async def hud_chat(request: Request) -> JSONResponse:
 
         def consume(sid: str) -> list[str]:
             parts: list[str] = []
-            for kind, value in HERMES.chat_stream_events(sid, text, timeout):
+            for kind, value in HERMES.chat_stream_events(sid, message, timeout):
                 if kind == "text":
                     parts.append(value)
                 elif kind == "tool":
