@@ -561,6 +561,24 @@ function connect(){
 connect();
 
 /* ============================== audio out ========================== */
+/* Jitter buffer for the self-hosted TTS path.
+
+   Measured on this deployment over 25 long Kokoro replies vs 371 ElevenLabs ones:
+   ElevenLabs produces audio in 0.63x the time it takes to speak it, so it runs
+   ~37% ahead and silently absorbs any upstream pause. Kokoro runs at 1.09x -- no
+   reserve at all -- and its median time-to-first-byte is 1.74s vs ElevenLabs'
+   0.17s. So when generation stalls mid-reply (usually a tool call: 70% of
+   tool-using turns fall behind realtime, vs 40% without), Kokoro drains the
+   buffer and takes ~1.7s to make sound again. Long replies hit several such
+   stalls, which is heard as chopped, halting speech.
+
+   Fix: when starting from a drained playhead, schedule the first chunk further
+   ahead so there is a cushion to ride through stalls. Applied ONLY when Kokoro
+   is the active engine -- ElevenLabs already has margin and must not be slowed. */
+const JITTER_LEAD_S = 1.8;     // cushion for Kokoro; tune down if replies feel sluggish
+const MIN_LEAD_S = 0.06;       // original behaviour, kept for ElevenLabs
+let ttsIsKokoro = false;       // set from /api/tts-provider by refreshVoiceProvider()
+
 function ensureCtx(){
   if(!audioCtx){
     try{ audioCtx=new (window.AudioContext||window.webkitAudioContext)({sampleRate:16000}); }
@@ -579,7 +597,12 @@ function playChunk(buf){
   for(let i=0;i<i16.length;i++)f32[i]=i16[i]/32768;
   const ab=audioCtx.createBuffer(1,f32.length,16000); ab.copyToChannel(f32,0);
   const src=audioCtx.createBufferSource(); src.buffer=ab; src.connect(audioCtx.destination);
-  const t=Math.max(audioCtx.currentTime+0.06,playhead);
+  // Drained playhead means we are starting (or recovering from a stall): take the
+  // cushion. Mid-stream chunks still stack tightly so nothing is added to latency
+  // once audio is already flowing.
+  const drained = playhead <= audioCtx.currentTime;
+  const lead = (drained && ttsIsKokoro) ? JITTER_LEAD_S : MIN_LEAD_S;
+  const t=Math.max(audioCtx.currentTime+lead,playhead);
   src.start(t); playhead=t+ab.duration;
   activeSources.push(src); src.onended=()=>{activeSources=activeSources.filter(x=>x!==src)};
   audioArrived=true;
@@ -895,6 +918,7 @@ async function refreshVoiceProvider(){
   try{
     const r=await fetch("/api/tts-provider"); const j=await r.json();
     const label=j.provider==="kokoro"?"Kokoro (self-hosted)":"ElevenLabs";
+    ttsIsKokoro = (j.provider==="kokoro");
     $("voiceProviderLabel").textContent=label;
     $("voiceProviderBtn").textContent=j.provider==="kokoro"?"SWITCH TO ELEVENLABS":"SWITCH TO KOKORO";
   }catch{ $("voiceProviderLabel").textContent="unavailable"; }
