@@ -65,11 +65,12 @@ security:
   extra_origin_hosts: []            # e.g. ["192.168.1.10"] if you open the HUD by raw IP
 
 voice:
-  provider: elevenlabs
-  model: eleven_flash_v2_5
+  provider: elevenlabs       # elevenlabs (default) or sixtydb
+  model: eleven_flash_v2_5   # for sixtydb: omit to use the workspace default
   voice_name: "Your chosen voice"
-  voice_id: YOUR_ELEVENLABS_VOICE_ID
+  voice_id: YOUR_ELEVENLABS_VOICE_ID  # for sixtydb: your workspace voice ID
   output_format: pcm_16000
+  # speed: 1.0              # optional sixtydb speed, 0.5 to 2.0
 
 persona:                     # used only by the anthropic fallback path
   system_prompt: >

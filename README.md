@@ -77,7 +77,8 @@ restart.
   configured with an LLM provider
 - Python 3.11+
 - An [ElevenLabs](https://elevenlabs.io) API key (free tier works; ~0.5
-  credits/char on Flash)
+  credits/char on Flash), or a 60db API key and workspace voice ID
+  ([60db setup](docs/SETUP.md#alternative-60db))
 - Any modern browser on the LAN
 
 ## Install

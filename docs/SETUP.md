@@ -39,6 +39,37 @@ ELEVENLABS_API_KEY=...
 
 For the HUD's quota bar, give the key the **User → Read** permission.
 
+### Alternative: 60db
+
+Add `SIXTYDB_API_KEY=your-key` to `~/.hermes/.env`, then replace the `voice`
+section in `server/config/server.yaml`:
+
+```yaml
+voice:
+  provider: sixtydb
+  voice_id: your-workspace-voice-id
+  output_format: pcm_16000
+  speed: 1.0
+  # model: 60db-fast-v01  # optional; omit for the workspace default
+```
+
+Get your voice ID from the authenticated [60db voice catalog](https://docs.60db.ai/api-reference/tts/get-voices).
+The server requests mono PCM16 at 16 kHz for browser playback. It validates WAV
+metadata and JSON/NDJSON audio envelopes, rejects redirects and synthesis errors,
+and caps responses at 32 MiB. Speed accepts 0.5 to 2.0; sentences are limited to
+5000 characters. Text still passes through the existing privacy filter.
+
+Barge-in stops playback and signals the HTTP worker to stop consuming audio.
+A blocked HTTP read can take up to 30 seconds to release; connect timeout is
+10 seconds. WAV/JSON responses buffer before validation; NDJSON PCM streams.
+The boot greeting generator and ElevenLabs quota bar remain ElevenLabs-specific.
+With only a 60db key, skip `make-boot-audio.sh`; live replies do not need it.
+
+Run `cd server && python -m unittest test_sixtydb test_server_tts` to check the protocol adapter.
+Live 60db synthesis and microphone playback were not available during this
+contribution; verify voice availability, greeting, interruption, and playback
+with your workspace credentials before deployment.
+
 ## 3. The voice pipeline server (this repo)
 
 ```bash

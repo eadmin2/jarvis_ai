@@ -27,6 +27,7 @@ import os
 import re
 import threading
 import time
+from contextlib import closing
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import AsyncIterator, Iterator
@@ -40,6 +41,7 @@ from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from RealtimeSTT import AudioToTextRecorder
+from sixtydb import tts_chunks as sixtydb_tts_chunks
 
 try:
     import psutil
@@ -434,8 +436,22 @@ class VoicePipelineServer:
 
     # ------------------------------------------------------------------ TTS
 
-    def tts_chunks_sync(self, text: str, timing: TurnTiming) -> Iterator[bytes]:
+    def tts_chunks_sync(self, text: str, timing: TurnTiming, stopped: threading.Event | None = None) -> Iterator[bytes]:
         voice = self.cfg["voice"]
+        provider = voice.get("provider", "elevenlabs")
+        if provider == "sixtydb":
+            timing.tts_model = voice.get("model") or "60db workspace default"
+            timing.voice_id = voice.get("voice_id", "")
+            timing.tts_request_start_monotonic = timing.tts_request_start_monotonic or time.perf_counter()
+            record_usage(tts_chars=len(text))
+            with closing(sixtydb_tts_chunks(text, voice, stopped)) as stream:
+                for chunk in stream:
+                    if timing.first_tts_audio_byte_monotonic is None:
+                        timing.first_tts_audio_byte_monotonic = time.perf_counter()
+                    yield chunk
+            return
+        if provider != "elevenlabs":
+            raise RuntimeError(f"Unsupported TTS provider: {provider}")
         key = os.environ.get("ELEVENLABS_API_KEY") or os.environ.get("ELEVEN_API_KEY") or os.environ.get("XI_API_KEY")
         if not key:
             raise RuntimeError("ElevenLabs API key not found")
@@ -463,6 +479,8 @@ class VoicePipelineServer:
             raise RuntimeError(f"ElevenLabs HTTP {response.status_code}: {response.text[:1000]}")
         try:
             for chunk in response.iter_content(chunk_size=4096):
+                if stopped is not None and stopped.is_set():
+                    return
                 if not chunk:
                     continue
                 if timing.first_tts_audio_byte_monotonic is None:
@@ -572,24 +590,39 @@ class VoicePipelineServer:
             return
         q: asyncio.Queue = asyncio.Queue()
         loop = asyncio.get_running_loop()
+        stopped = threading.Event()
+
+        def enqueue(item) -> None:
+            if not stopped.is_set():
+                q.put_nowait(item)
 
         def worker() -> None:
             try:
-                for chunk in self.tts_chunks_sync(sentence, timing):
-                    loop.call_soon_threadsafe(q.put_nowait, chunk)
-                loop.call_soon_threadsafe(q.put_nowait, None)
+                with closing(self.tts_chunks_sync(sentence, timing, stopped)) as stream:
+                    for chunk in stream:
+                        if stopped.is_set():
+                            break
+                        loop.call_soon_threadsafe(enqueue, chunk)
+                if not stopped.is_set():
+                    loop.call_soon_threadsafe(enqueue, None)
             except Exception as exc:
-                loop.call_soon_threadsafe(q.put_nowait, exc)
+                if not stopped.is_set():
+                    loop.call_soon_threadsafe(enqueue, exc)
 
         worker_task = asyncio.create_task(asyncio.to_thread(worker))
-        while True:
-            item = await q.get()
-            if item is None:
-                break
-            if isinstance(item, Exception):
-                raise item
-            await ws.send_bytes(item)
-        await worker_task
+        try:
+            while True:
+                item = await q.get()
+                if item is None:
+                    break
+                if isinstance(item, Exception):
+                    raise item
+                await ws.send_bytes(item)
+            await worker_task
+        finally:
+            # Cancelling an asyncio consumer does not stop its blocking HTTP thread.
+            stopped.set()
+            worker_task.cancel()
 
     @staticmethod
     def _extract_complete_sentences(text: str) -> tuple[list[str], str]:
